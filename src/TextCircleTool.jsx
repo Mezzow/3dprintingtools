@@ -64,7 +64,8 @@ function loadFont(font) {
   });
 }
 
-// =================== CONTOUR EXTRACTION (reused from image tool) ===================
+// =================== CONTOUR EXTRACTION ===================
+// (matching App.jsx function signatures exactly)
 
 var EDGE_COORDS = function(cx, cy, edge) {
   if (edge === 0) return [cx + 0.5, cy];
@@ -113,539 +114,576 @@ function chainSegments(segments) {
     if (used.has(si)) continue;
     var chain = [segments[si][0], segments[si][1]];
     used.add(si);
-    var extended = true;
-    while (extended) {
-      extended = false;
-      var tail = key(chain[chain.length - 1]);
-      if (adj.has(tail)) {
-        var nbrs = adj.get(tail);
-        for (var ni = 0; ni < nbrs.length; ni++) {
-          if (!used.has(nbrs[ni].idx)) {
-            used.add(nbrs[ni].idx);
-            chain.push(nbrs[ni].pt);
-            extended = true;
-            break;
-          }
+    var changed = true;
+    while (changed) {
+      changed = false;
+      var endKey = key(chain[chain.length - 1]);
+      var neighbors = adj.get(endKey) || [];
+      for (var ni = 0; ni < neighbors.length; ni++) {
+        if (!used.has(neighbors[ni].idx)) {
+          used.add(neighbors[ni].idx);
+          chain.push(neighbors[ni].pt);
+          changed = true;
+          break;
         }
       }
     }
-    if (chain.length >= 4) contours.push(chain);
+    if (chain.length > 3) contours.push(chain);
   }
   return contours;
 }
 
-function simplifyClosedContour(pts, tol) {
-  if (pts.length < 6) return pts;
-  var n = pts.length;
-  var maxD = 0, maxI = 0;
-  for (var i = 0; i < n; i++) {
-    var d = Math.hypot(pts[i][0] - pts[0][0], pts[i][1] - pts[0][1]);
-    if (d > maxD) { maxD = d; maxI = i; }
-  }
-  var a1 = pts.slice(0, maxI + 1);
-  var a2 = pts.slice(maxI).concat([pts[0]]);
-  return douglasPeucker(a1, tol).slice(0, -1).concat(douglasPeucker(a2, tol).slice(0, -1));
-}
-
-function douglasPeucker(pts, tol) {
-  if (pts.length <= 2) return pts;
-  var first = pts[0], last = pts[pts.length - 1];
-  var dx = last[0] - first[0], dy = last[1] - first[1];
+function douglasPeucker(points, epsilon) {
+  if (points.length <= 2) return points;
+  var maxDist = 0, maxIdx = 0;
+  var sx = points[0][0], sy = points[0][1];
+  var ex = points[points.length-1][0], ey = points[points.length-1][1];
+  var dx = ex - sx, dy = ey - sy;
   var lenSq = dx * dx + dy * dy;
-  var maxD = 0, maxI = 0;
-  for (var i = 1; i < pts.length - 1; i++) {
-    var d;
+  for (var i = 1; i < points.length - 1; i++) {
+    var dist;
     if (lenSq === 0) {
-      d = Math.hypot(pts[i][0] - first[0], pts[i][1] - first[1]);
+      dist = Math.hypot(points[i][0] - sx, points[i][1] - sy);
     } else {
-      var t = ((pts[i][0] - first[0]) * dx + (pts[i][1] - first[1]) * dy) / lenSq;
-      t = Math.max(0, Math.min(1, t));
-      d = Math.hypot(pts[i][0] - (first[0] + t * dx), pts[i][1] - (first[1] + t * dy));
+      var t = Math.max(0, Math.min(1, ((points[i][0] - sx) * dx + (points[i][1] - sy) * dy) / lenSq));
+      dist = Math.hypot(points[i][0] - (sx + t * dx), points[i][1] - (sy + t * dy));
     }
-    if (d > maxD) { maxD = d; maxI = i; }
+    if (dist > maxDist) { maxDist = dist; maxIdx = i; }
   }
-  if (maxD > tol) {
-    var left = douglasPeucker(pts.slice(0, maxI + 1), tol);
-    var right = douglasPeucker(pts.slice(maxI), tol);
+  if (maxDist > epsilon) {
+    var left = douglasPeucker(points.slice(0, maxIdx + 1), epsilon);
+    var right = douglasPeucker(points.slice(maxIdx), epsilon);
     return left.slice(0, -1).concat(right);
   }
-  return [first, last];
+  return [points[0], points[points.length - 1]];
 }
 
-function vertexAngle(prev, curr, next) {
-  var ax = prev[0]-curr[0], ay = prev[1]-curr[1];
-  var bx = next[0]-curr[0], by = next[1]-curr[1];
-  var dot = ax*bx+ay*by;
-  var cross = ax*by-ay*bx;
-  return Math.abs(Math.atan2(cross, dot)) * 180 / Math.PI;
+function simplifyClosedContour(pts, epsilon) {
+  if (pts.length < 6) return pts;
+  var half = Math.floor(pts.length / 2);
+  var seg1 = pts.slice(0, half + 1);
+  var seg2 = pts.slice(half).concat([pts[0]]);
+  var s1 = douglasPeucker(seg1, epsilon);
+  var s2 = douglasPeucker(seg2, epsilon);
+  var result = s1.slice(0, -1).concat(s2.slice(0, -1));
+  return result;
 }
 
-function smoothWeighted(pts, sharpAngle) {
+function vertexAngle(pts, i) {
   var n = pts.length;
-  var out = [];
-  for (var i = 0; i < n; i++) {
-    var prev = pts[(i - 1 + n) % n];
-    var next = pts[(i + 1) % n];
-    var angle = vertexAngle(prev, pts[i], next);
-    if (angle < sharpAngle) { out.push(pts[i]); continue; }
-    out.push([(prev[0]+pts[i][0]+next[0])/3, (prev[1]+pts[i][1]+next[1])/3]);
-  }
-  return out;
+  var prev = pts[(i - 1 + n) % n];
+  var cur = pts[i];
+  var next = pts[(i + 1) % n];
+  var ax = prev[0] - cur[0], ay = prev[1] - cur[1];
+  var bx = next[0] - cur[0], by = next[1] - cur[1];
+  var dot = ax * bx + ay * by;
+  var cross = ax * by - ay * bx;
+  return Math.atan2(Math.abs(cross), dot) * 180 / Math.PI;
 }
 
-function subdivide(pts, sharpAngle) {
+function smoothWeighted(points, iterations, sharpAngle) {
+  if (points.length < 4 || iterations <= 0) return points;
+  var pts = points.map(function(p) { return [p[0], p[1]]; });
   var n = pts.length;
-  var out = [];
-  for (var i = 0; i < n; i++) {
-    var next = pts[(i + 1) % n];
-    out.push(pts[i]);
-    var angle = vertexAngle(pts[(i-1+n)%n], pts[i], next);
-    var angle2 = vertexAngle(pts[i], next, pts[(i+2)%n]);
-    if (angle >= sharpAngle && angle2 >= sharpAngle) {
-      out.push([0.75*pts[i][0]+0.25*next[0], 0.75*pts[i][1]+0.25*next[1]]);
-      out.push([0.25*pts[i][0]+0.75*next[0], 0.25*pts[i][1]+0.75*next[1]]);
+  var sharp = sharpAngle || 90;
+
+  for (var iter = 0; iter < iterations; iter++) {
+    var newPts = [];
+    for (var i = 0; i < n; i++) {
+      var prev = pts[(i - 1 + n) % n];
+      var cur = pts[i];
+      var next = pts[(i + 1) % n];
+      var angle = vertexAngle(pts, i);
+
+      var w;
+      if (angle < sharp) {
+        w = 0;
+      } else if (angle < sharp + 40) {
+        w = 0.5 * (angle - sharp) / 40;
+      } else {
+        w = 0.5;
+      }
+
+      var midX = (prev[0] + next[0]) / 2;
+      var midY = (prev[1] + next[1]) / 2;
+      newPts.push([
+        cur[0] + (midX - cur[0]) * w,
+        cur[1] + (midY - cur[1]) * w
+      ]);
     }
+    pts = newPts;
   }
-  return out;
+  return pts;
+}
+
+function subdivide(points, iterations, sharpAngle) {
+  if (points.length < 4 || iterations <= 0) return points;
+  var pts = points;
+  var sharp = sharpAngle || 90;
+
+  for (var iter = 0; iter < iterations; iter++) {
+    var newPts = [];
+    var n = pts.length;
+    for (var i = 0; i < n; i++) {
+      var p0 = pts[i];
+      var p1 = pts[(i + 1) % n];
+      var angle = vertexAngle(pts, i);
+
+      if (angle < sharp) {
+        newPts.push(p0);
+        newPts.push([(p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2]);
+      } else {
+        newPts.push([0.75 * p0[0] + 0.25 * p1[0], 0.75 * p0[1] + 0.25 * p1[1]]);
+        newPts.push([0.25 * p0[0] + 0.75 * p1[0], 0.25 * p0[1] + 0.75 * p1[1]]);
+      }
+    }
+    pts = newPts;
+  }
+  return pts;
 }
 
 function resampleUniform(pts, spacing) {
+  if (pts.length < 3) return pts;
   var n = pts.length;
-  var perimeter = 0;
+  var dists = [0];
   for (var i = 0; i < n; i++) {
-    var next = pts[(i+1)%n];
-    perimeter += Math.hypot(next[0]-pts[i][0], next[1]-pts[i][1]);
+    var j = (i + 1) % n;
+    dists.push(dists[i] + Math.hypot(pts[j][0] - pts[i][0], pts[j][1] - pts[i][1]));
   }
-  var count = Math.max(6, Math.round(perimeter / spacing));
-  var step = perimeter / count;
-  var out = [pts[0]];
-  var seg = 0, segOff = 0, acc = 0;
-  for (var ci = 1; ci < count; ci++) {
-    var target = ci * step;
-    while (acc + segLen() - segOff < target && seg < n) {
-      acc += segLen() - segOff;
-      seg = (seg + 1) % n;
-      segOff = 0;
-    }
-    var rem = target - acc;
-    var sl = segLen();
-    var t = sl > 0 ? (segOff + rem) / sl : 0;
-    var a = pts[seg], b = pts[(seg+1)%n];
-    out.push([a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t]);
-    segOff += rem;
-    acc = target;
+  var totalLen = dists[n];
+  var numPts = Math.max(12, Math.round(totalLen / spacing));
+  var step = totalLen / numPts;
+
+  var result = [];
+  var segI = 0;
+  for (var pi = 0; pi < numPts; pi++) {
+    var targetD = pi * step;
+    while (segI < n - 1 && dists[segI + 1] < targetD) segI++;
+    var segStart = dists[segI];
+    var segEnd = dists[segI + 1];
+    var segL = segEnd - segStart;
+    var t = segL > 0.0001 ? (targetD - segStart) / segL : 0;
+    var ni = (segI + 1) % n;
+    result.push([
+      pts[segI][0] + (pts[ni][0] - pts[segI][0]) * t,
+      pts[segI][1] + (pts[ni][1] - pts[segI][1]) * t
+    ]);
   }
-  function segLen() {
-    var a = pts[seg], b = pts[(seg+1)%n];
-    return Math.hypot(b[0]-a[0], b[1]-a[1]);
-  }
-  return out;
+  return result;
 }
 
-function processContour(pts, iters, canvasW, sharpAngle) {
-  pts = simplifyClosedContour(pts, 1.2);
-  for (var i = 0; i < iters; i++) {
-    pts = subdivide(pts, sharpAngle);
-    pts = smoothWeighted(pts, sharpAngle);
+function processContour(rawChain, smoothLevel, imgW, sharpAngle) {
+  var epsilon = Math.max(0.3, imgW * 0.002);
+  var simplified = simplifyClosedContour(rawChain, epsilon);
+  if (simplified.length < 3) return simplified;
+
+  if (smoothLevel <= 0) {
+    var targetSpacing = Math.max(0.3, imgW * 0.003);
+    return resampleUniform(simplified, targetSpacing);
   }
-  var spacing = Math.max(1.5, canvasW / 300);
-  pts = resampleUniform(pts, spacing);
-  return pts;
+
+  var subdivided = subdivide(simplified, 1, sharpAngle);
+  var laplacianIter = smoothLevel * 2;
+  var smoothed = smoothWeighted(subdivided, laplacianIter, sharpAngle);
+  var targetSpacing2 = Math.max(0.3, imgW * 0.003);
+  var resampled = resampleUniform(smoothed, targetSpacing2);
+  return resampled;
 }
 
 // =================== MESH GENERATION ===================
 
-function computeNormals(ring) {
-  var n = ring.length;
+function computeNormals(contour) {
+  var n = contour.length;
   var normals = [];
   for (var i = 0; i < n; i++) {
-    var prev = ring[(i - 1 + n) % n];
-    var next = ring[(i + 1) % n];
-    var dx = next[0] - prev[0], dy = next[1] - prev[1];
-    var len = Math.hypot(dx, dy) || 1;
-    normals.push([-dy / len, dx / len]);
+    var prev = (i - 1 + n) % n;
+    var next = (i + 1) % n;
+    var dx1 = contour[i][0] - contour[prev][0];
+    var dy1 = contour[i][1] - contour[prev][1];
+    var dx2 = contour[next][0] - contour[i][0];
+    var dy2 = contour[next][1] - contour[i][1];
+    var l1 = Math.hypot(dx1, dy1) || 1;
+    var l2 = Math.hypot(dx2, dy2) || 1;
+    var nx = (-dy1 / l1 + -dy2 / l2) / 2;
+    var ny = (dx1 / l1 + dx2 / l2) / 2;
+    var nl = Math.hypot(nx, ny) || 1;
+    normals.push([nx / nl, ny / nl]);
   }
   return normals;
 }
 
-function generateFrameMesh(contour, scale, wallT, extH, bevelSteps, bevelBottom) {
+function generateFrameMesh(contour, wallThick, height, scale, bevelSteps, bevelBottom) {
   var n = contour.length;
+  if (n < 3) return [];
   var normals = computeNormals(contour);
-  var bevelR = Math.min(wallT * 0.5, extH * 0.45);
-  var topZ = extH;
-  var halfWall = wallT / 2;
-
-  function bevelProfile(steps) {
-    var pts = [];
-    for (var i = 0; i <= steps; i++) {
-      var a = (Math.PI / 2) * (i / steps);
-      pts.push({ dr: bevelR * (1 - Math.cos(a)), dz: bevelR * Math.sin(a) });
-    }
-    return pts;
-  }
-  var topBevel = bevelSteps > 0 ? bevelProfile(bevelSteps) : [];
-  var botBevel = (bevelSteps > 0 && bevelBottom) ? bevelProfile(bevelSteps) : [];
-
   var tris = [];
-  function tri(a, b, c) { tris.push(a, b, c); }
-  function quad(a, b, c, d) { tri(a, b, c); tri(a, c, d); }
+  var half = wallThick / (2 * scale);
+  var h = height / scale;
+  var bevelR = Math.min(wallThick * 0.35, height * 0.35) / scale;
+  var steps = bevelSteps || 4;
 
-  function makeRing(offset, z) {
-    var ring = [];
-    for (var i = 0; i < n; i++) {
-      ring.push([
-        (contour[i][0] + normals[i][0] * offset) * scale,
-        (contour[i][1] + normals[i][1] * offset) * scale,
-        z
-      ]);
-    }
-    return ring;
-  }
-
-  function bandRings(r1, r2) {
-    for (var i = 0; i < n; i++) {
-      var j = (i + 1) % n;
-      quad(r1[i], r1[j], r2[j], r2[i]);
-    }
-  }
-
-  // Build layers for outer wall
-  var outerLayers = [];
-  if (botBevel.length > 0) {
-    for (var bi = botBevel.length - 1; bi >= 0; bi--) {
-      outerLayers.push(makeRing(halfWall - botBevel[bi].dr, botBevel[bi].dz));
+  var profile = [];
+  if (bevelBottom && steps > 0) {
+    for (var s = 0; s <= steps; s++) {
+      var angle = (s / steps) * Math.PI / 2;
+      profile.push({ z: bevelR * (1 - Math.cos(angle)), inset: bevelR * (1 - Math.sin(angle)) });
     }
   } else {
-    outerLayers.push(makeRing(halfWall, 0));
+    profile.push({ z: 0, inset: 0 });
   }
-  if (topBevel.length > 0) {
-    for (var ti = 0; ti < topBevel.length; ti++) {
-      outerLayers.push(makeRing(halfWall - topBevel[ti].dr, topZ - bevelR + topBevel[ti].dz));
+  if (steps > 0) {
+    for (var s2 = steps; s2 >= 0; s2--) {
+      var angle2 = (s2 / steps) * Math.PI / 2;
+      profile.push({ z: h - bevelR * (1 - Math.cos(angle2)), inset: bevelR * (1 - Math.sin(angle2)) });
     }
   } else {
-    outerLayers.push(makeRing(halfWall, topZ));
+    profile.push({ z: h, inset: 0 });
   }
 
-  // Build layers for inner wall
-  var innerLayers = [];
-  if (botBevel.length > 0) {
-    for (var bi2 = botBevel.length - 1; bi2 >= 0; bi2--) {
-      innerLayers.push(makeRing(-halfWall + botBevel[bi2].dr, botBevel[bi2].dz));
+  var mkPt = function(i, outer, profIdx) {
+    var ins = profile[profIdx].inset;
+    var effectiveHalf = half - ins;
+    if (effectiveHalf < 0.01 / scale) effectiveHalf = 0.01 / scale;
+    return [
+      (contour[i][0] + normals[i][0] * effectiveHalf * (outer ? 1 : -1)) * scale,
+      (contour[i][1] + normals[i][1] * effectiveHalf * (outer ? 1 : -1)) * scale,
+      profile[profIdx].z * scale
+    ];
+  };
+
+  for (var i = 0; i < n; i++) {
+    var j = (i + 1) % n;
+    for (var pi = 0; pi < profile.length - 1; pi++) {
+      tris.push([mkPt(i,true,pi), mkPt(j,true,pi), mkPt(j,true,pi+1)]);
+      tris.push([mkPt(i,true,pi), mkPt(j,true,pi+1), mkPt(i,true,pi+1)]);
+      tris.push([mkPt(j,false,pi), mkPt(i,false,pi), mkPt(i,false,pi+1)]);
+      tris.push([mkPt(j,false,pi), mkPt(i,false,pi+1), mkPt(j,false,pi+1)]);
     }
-  } else {
-    innerLayers.push(makeRing(-halfWall, 0));
+    var topIdx = profile.length - 1;
+    tris.push([mkPt(i,true,topIdx), mkPt(j,true,topIdx), mkPt(j,false,topIdx)]);
+    tris.push([mkPt(i,true,topIdx), mkPt(j,false,topIdx), mkPt(i,false,topIdx)]);
+    tris.push([mkPt(j,true,0), mkPt(i,true,0), mkPt(i,false,0)]);
+    tris.push([mkPt(j,true,0), mkPt(i,false,0), mkPt(j,false,0)]);
   }
-  if (topBevel.length > 0) {
-    for (var ti2 = 0; ti2 < topBevel.length; ti2++) {
-      innerLayers.push(makeRing(-halfWall + topBevel[ti2].dr, topZ - bevelR + topBevel[ti2].dz));
-    }
-  } else {
-    innerLayers.push(makeRing(-halfWall, topZ));
-  }
-
-  // Connect outer layers
-  for (var li = 0; li < outerLayers.length - 1; li++) bandRings(outerLayers[li], outerLayers[li + 1]);
-  // Connect inner layers (reversed winding)
-  for (var li2 = 0; li2 < innerLayers.length - 1; li2++) bandRings(innerLayers[li2 + 1], innerLayers[li2]);
-  // Top cap (connect outer top to inner top)
-  bandRings(outerLayers[outerLayers.length - 1], innerLayers[innerLayers.length - 1]);
-  // Bottom cap
-  bandRings(innerLayers[0], outerLayers[0]);
-
   return tris;
 }
 
-function generateSolidMesh(contour, scale, extH, bevelSteps, bevelBottom) {
-  var n = contour.length;
-  var normals = computeNormals(contour);
-  var bevelR = Math.min(extH * 0.45, 2.0);
-
-  function bevelProfile(steps) {
-    var pts = [];
-    for (var i = 0; i <= steps; i++) {
-      var a = (Math.PI / 2) * (i / steps);
-      pts.push({ dr: bevelR * (1 - Math.cos(a)), dz: bevelR * Math.sin(a) });
-    }
-    return pts;
+function signedArea(pts) {
+  var a = 0;
+  for (var i = 0; i < pts.length; i++) {
+    var j = (i + 1) % pts.length;
+    a += pts[i][0] * pts[j][1] - pts[j][0] * pts[i][1];
   }
-  var topBevel = bevelSteps > 0 ? bevelProfile(bevelSteps) : [];
-  var botBevel = (bevelSteps > 0 && bevelBottom) ? bevelProfile(bevelSteps) : [];
+  return a / 2;
+}
 
-  var tris = [];
-  function tri(a, b, c) { tris.push(a, b, c); }
-  function quad(a, b, c, d) { tri(a, b, c); tri(a, c, d); }
-
-  function makeRing(offset, z) {
-    var ring = [];
-    for (var i = 0; i < n; i++) {
-      ring.push([
-        (contour[i][0] + normals[i][0] * offset) * scale,
-        (contour[i][1] + normals[i][1] * offset) * scale,
-        z
-      ]);
-    }
-    return ring;
-  }
-
-  function bandRings(r1, r2) {
-    for (var i = 0; i < n; i++) {
-      var j = (i + 1) % n;
-      quad(r1[i], r1[j], r2[j], r2[i]);
-    }
-  }
-
-  var layers = [];
-  if (botBevel.length > 0) {
-    for (var bi = botBevel.length - 1; bi >= 0; bi--) {
-      layers.push(makeRing(-botBevel[bi].dr, botBevel[bi].dz));
-    }
-  } else {
-    layers.push(makeRing(0, 0));
-  }
-  if (topBevel.length > 0) {
-    for (var ti = 0; ti < topBevel.length; ti++) {
-      layers.push(makeRing(-topBevel[ti].dr, extH - bevelR + topBevel[ti].dz));
-    }
-  } else {
-    layers.push(makeRing(0, extH));
-  }
-
-  for (var li = 0; li < layers.length - 1; li++) bandRings(layers[li], layers[li + 1]);
-
-  // Top and bottom faces via ear clipping
-  var topRing = layers[layers.length - 1];
-  var botRing = layers[0];
-  var topZ = topRing[0][2], botZ = botRing[0][2];
-  var pts2d = [];
-  for (var i = 0; i < n; i++) pts2d.push([topRing[i][0], topRing[i][1]]);
-  var earTris = earClip(pts2d);
-  for (var ei = 0; ei < earTris.length; ei += 3) {
-    var a = earTris[ei], b = earTris[ei+1], c = earTris[ei+2];
-    tri([pts2d[a][0], pts2d[a][1], topZ], [pts2d[b][0], pts2d[b][1], topZ], [pts2d[c][0], pts2d[c][1], topZ]);
-    tri([pts2d[c][0], pts2d[c][1], botZ], [pts2d[b][0], pts2d[b][1], botZ], [pts2d[a][0], pts2d[a][1], botZ]);
-  }
-  return tris;
+function ptInTri(p, a, b, c) {
+  var cross = function(o, a2, b2) { return (a2[0]-o[0])*(b2[1]-o[1]) - (a2[1]-o[1])*(b2[0]-o[0]); };
+  var d1 = cross(p,a,b), d2 = cross(p,b,c), d3 = cross(p,c,a);
+  return !((d1<0||d2<0||d3<0) && (d1>0||d2>0||d3>0));
 }
 
 function earClip(polygon) {
-  var n = polygon.length;
-  if (n < 3) return [];
-  var indices = [];
-  for (var i = 0; i < n; i++) indices.push(i);
+  if (polygon.length < 3) return [];
+  var pts = polygon.slice();
+  if (signedArea(pts) > 0) pts.reverse();
   var tris = [];
-  var iter = 0;
-  while (indices.length > 2 && iter < n * n) {
-    iter++;
+  var safety = pts.length * 3;
+  while (pts.length > 3 && safety-- > 0) {
     var found = false;
-    for (var i2 = 0; i2 < indices.length; i2++) {
-      var prev = indices[(i2 - 1 + indices.length) % indices.length];
-      var curr = indices[i2];
-      var next = indices[(i2 + 1) % indices.length];
-      var ax = polygon[prev][0], ay = polygon[prev][1];
-      var bx = polygon[curr][0], by = polygon[curr][1];
-      var cx = polygon[next][0], cy = polygon[next][1];
-      var cross = (bx-ax)*(cy-ay)-(by-ay)*(cx-ax);
-      if (cross <= 0) continue;
-      var earOk = true;
-      for (var j = 0; j < indices.length; j++) {
-        if (j === (i2-1+indices.length)%indices.length || j === i2 || j === (i2+1)%indices.length) continue;
-        var p = polygon[indices[j]];
-        if (pointInTri(p, [ax,ay],[bx,by],[cx,cy])) { earOk = false; break; }
+    for (var i = 0; i < pts.length; i++) {
+      var p = (i-1+pts.length) % pts.length;
+      var nx = (i+1) % pts.length;
+      var cross = (pts[i][0]-pts[p][0])*(pts[nx][1]-pts[p][1]) - (pts[i][1]-pts[p][1])*(pts[nx][0]-pts[p][0]);
+      if (cross >= 0) continue;
+      var ear = true;
+      for (var jj = 0; jj < pts.length; jj++) {
+        if (jj===p||jj===i||jj===nx) continue;
+        if (ptInTri(pts[jj], pts[p], pts[i], pts[nx])) { ear = false; break; }
       }
-      if (earOk) {
-        tris.push(prev, curr, next);
-        indices.splice(i2, 1);
-        found = true;
-        break;
-      }
+      if (ear) { tris.push([pts[p], pts[i], pts[nx]]); pts.splice(i,1); found = true; break; }
     }
     if (!found) break;
   }
+  if (pts.length === 3) tris.push([pts[0], pts[1], pts[2]]);
   return tris;
 }
 
-function pointInTri(p, a, b, c) {
-  var d1 = (p[0]-b[0])*(a[1]-b[1])-(a[0]-b[0])*(p[1]-b[1]);
-  var d2 = (p[0]-c[0])*(b[1]-c[1])-(b[0]-c[0])*(p[1]-c[1]);
-  var d3 = (p[0]-a[0])*(c[1]-a[1])-(c[0]-a[0])*(p[1]-a[1]);
-  var hasNeg = (d1<0)||(d2<0)||(d3<0);
-  var hasPos = (d1>0)||(d2>0)||(d3>0);
-  return !(hasNeg && hasPos);
+function generateSolidMesh(contour, height, scale, bevelSteps, bevelBottom) {
+  var n = contour.length;
+  if (n < 3) return [];
+  var tris = [];
+  var h = height;
+  var normals = computeNormals(contour);
+  var bevelR = Math.min(height * 0.3, 1.5);
+  var steps = bevelSteps || 4;
+  var scaledNormals = normals;
+
+  var profile = [];
+  if (bevelBottom && steps > 0) {
+    for (var s = 0; s <= steps; s++) {
+      var angle = (s / steps) * Math.PI / 2;
+      profile.push({ z: bevelR * (1 - Math.cos(angle)), inset: bevelR * (1 - Math.sin(angle)) });
+    }
+  } else {
+    profile.push({ z: 0, inset: 0 });
+  }
+  if (steps > 0) {
+    for (var s2 = steps; s2 >= 0; s2--) {
+      var angle2 = (s2 / steps) * Math.PI / 2;
+      profile.push({ z: h - bevelR * (1 - Math.cos(angle2)), inset: bevelR * (1 - Math.sin(angle2)) });
+    }
+  } else {
+    profile.push({ z: h, inset: 0 });
+  }
+
+  for (var i = 0; i < n; i++) {
+    var j = (i + 1) % n;
+    for (var pi = 0; pi < profile.length - 1; pi++) {
+      var ins0 = profile[pi].inset / scale;
+      var ins1 = profile[pi + 1].inset / scale;
+      var a0 = [
+        (contour[i][0] - scaledNormals[i][0] * ins0) * scale,
+        (contour[i][1] - scaledNormals[i][1] * ins0) * scale,
+        profile[pi].z
+      ];
+      var a1 = [
+        (contour[j][0] - scaledNormals[j][0] * ins0) * scale,
+        (contour[j][1] - scaledNormals[j][1] * ins0) * scale,
+        profile[pi].z
+      ];
+      var b0 = [
+        (contour[i][0] - scaledNormals[i][0] * ins1) * scale,
+        (contour[i][1] - scaledNormals[i][1] * ins1) * scale,
+        profile[pi + 1].z
+      ];
+      var b1 = [
+        (contour[j][0] - scaledNormals[j][0] * ins1) * scale,
+        (contour[j][1] - scaledNormals[j][1] * ins1) * scale,
+        profile[pi + 1].z
+      ];
+      tris.push([a0, a1, b1]);
+      tris.push([a0, b1, b0]);
+    }
+  }
+  var topInset = profile[profile.length - 1].inset / scale;
+  var botInset = profile[0].inset / scale;
+  var topZ = profile[profile.length - 1].z;
+  var botZ = profile[0].z;
+  var topPoly = contour.map(function(p, i) {
+    return [(p[0] - scaledNormals[i][0] * topInset) * scale, (p[1] - scaledNormals[i][1] * topInset) * scale];
+  });
+  var topTris = earClip(topPoly);
+  for (var ti = 0; ti < topTris.length; ti++) {
+    var t = topTris[ti];
+    tris.push([[t[0][0],t[0][1],topZ],[t[1][0],t[1][1],topZ],[t[2][0],t[2][1],topZ]]);
+    tris.push([[t[0][0],t[0][1],botZ],[t[2][0],t[2][1],botZ],[t[1][0],t[1][1],botZ]]);
+  }
+  return tris;
 }
 
 // =================== STL EXPORT ===================
 
-function buildSTLBuffer(tris) {
-  var nTris = tris.length / 3;
-  var buf = new ArrayBuffer(84 + nTris * 50);
+function buildSTLBuffer(triangles) {
+  var numTris = triangles.length;
+  var buf = new ArrayBuffer(84 + numTris * 50);
   var view = new DataView(buf);
-  view.setUint32(80, nTris, true);
+  var header = "Text-Circle-STL";
+  for (var i = 0; i < 80; i++) view.setUint8(i, i < header.length ? header.charCodeAt(i) : 0);
+  view.setUint32(80, numTris, true);
   var off = 84;
-  for (var i = 0; i < tris.length; i += 3) {
-    var a = tris[i], b = tris[i+1], c = tris[i+2];
-    var ux = b[0]-a[0], uy = b[1]-a[1], uz = b[2]-a[2];
-    var vx = c[0]-a[0], vy = c[1]-a[1], vz = c[2]-a[2];
-    var nx = uy*vz-uz*vy, ny = uz*vx-ux*vz, nz = ux*vy-uy*vx;
-    var nl = Math.hypot(nx,ny,nz) || 1;
-    view.setFloat32(off,nx/nl,true); view.setFloat32(off+4,ny/nl,true); view.setFloat32(off+8,nz/nl,true);
-    off += 12;
-    view.setFloat32(off,a[0],true); view.setFloat32(off+4,a[1],true); view.setFloat32(off+8,a[2],true); off+=12;
-    view.setFloat32(off,b[0],true); view.setFloat32(off+4,b[1],true); view.setFloat32(off+8,b[2],true); off+=12;
-    view.setFloat32(off,c[0],true); view.setFloat32(off+4,c[1],true); view.setFloat32(off+8,c[2],true); off+=12;
-    view.setUint16(off,0,true); off+=2;
+  for (var ti = 0; ti < numTris; ti++) {
+    var tri = triangles[ti];
+    var a = tri[0], b = tri[1], c = tri[2];
+    var ux=b[0]-a[0],uy=b[1]-a[1],uz=b[2]-a[2];
+    var vx=c[0]-a[0],vy=c[1]-a[1],vz=c[2]-a[2];
+    var nx=uy*vz-uz*vy, ny=uz*vx-ux*vz, nz=ux*vy-uy*vx;
+    var nl=Math.hypot(nx,ny,nz)||1;
+    view.setFloat32(off,nx/nl,true);off+=4;
+    view.setFloat32(off,ny/nl,true);off+=4;
+    view.setFloat32(off,nz/nl,true);off+=4;
+    var pts = [a,b,c];
+    for (var pi = 0; pi < 3; pi++) {
+      view.setFloat32(off,pts[pi][0],true);off+=4;
+      view.setFloat32(off,pts[pi][1],true);off+=4;
+      view.setFloat32(off,pts[pi][2],true);off+=4;
+    }
+    view.setUint16(off,0,true);off+=2;
   }
   return buf;
 }
 
-function arrayBufferToBase64(buf) {
-  var bytes = new Uint8Array(buf);
-  var str = "";
-  for (var i = 0; i < bytes.length; i++) str += String.fromCharCode(bytes[i]);
-  return btoa(str);
+function arrayBufferToBase64(buffer) {
+  var bytes = new Uint8Array(buffer);
+  var binary = "";
+  var chunk = 8192;
+  for (var i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
 }
 
-function buildTriangles(contours, mode, targetWidth, effectiveW, wallThickness, extrudeHeight, bevelSteps, bevelBottom) {
-  var scale = targetWidth / effectiveW;
+function buildTriangles(contours, mode, targetWidth, imgW, wallThickness, extrudeHeight, bevelSteps, bevelBottom) {
+  var scale = targetWidth / (imgW || 100);
   var allTris = [];
   for (var ci = 0; ci < contours.length; ci++) {
-    var c = contours[ci];
-    var mesh;
-    if (mode === "frame") {
-      mesh = generateFrameMesh(c, scale, wallThickness, extrudeHeight, bevelSteps, bevelBottom);
-    } else {
-      mesh = generateSolidMesh(c, scale, extrudeHeight, bevelSteps, bevelBottom);
-    }
-    for (var i = 0; i < mesh.length; i++) allTris.push(mesh[i]);
+    var tris = mode === "frame"
+      ? generateFrameMesh(contours[ci], wallThickness, extrudeHeight, scale, bevelSteps, bevelBottom)
+      : generateSolidMesh(contours[ci], extrudeHeight, scale, bevelSteps, bevelBottom);
+    allTris = allTris.concat(tris);
   }
   return allTris;
 }
 
 // =================== 3D PREVIEW ===================
 
-function Preview3D(props) {
+function Preview3D({ triangles }) {
   var mountRef = useRef(null);
-  var stateRef = useRef(null);
+  var stateRef = useRef({});
 
   useEffect(function() {
     var el = mountRef.current;
     if (!el) return;
-    var w = el.clientWidth, h = Math.min(w * 0.7, 400);
+    var w = el.clientWidth;
+    var h = 340;
+
     var scene = new THREE.Scene();
-    scene.background = new THREE.Color("#faf5ef");
-    var camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 2000);
+    scene.background = new THREE.Color(0xf5efe6);
+    var camera = new THREE.PerspectiveCamera(40, w / h, 0.1, 5000);
     var renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(w, h);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    el.innerHTML = "";
     el.appendChild(renderer.domElement);
 
     scene.add(new THREE.AmbientLight(0xffffff, 0.6));
-    var dl = new THREE.DirectionalLight(0xffffff, 0.8);
-    dl.position.set(5, 5, 10);
-    scene.add(dl);
+    var d1 = new THREE.DirectionalLight(0xffffff, 0.9);
+    d1.position.set(1,2,3); scene.add(d1);
+    var d2 = new THREE.DirectionalLight(0xffffff, 0.3);
+    d2.position.set(-2,-1,1); scene.add(d2);
 
-    var grid = new THREE.GridHelper(200, 20, 0xd4bfa6, 0xe8dcc8);
-    grid.rotation.x = Math.PI / 2;
+    var grid = new THREE.GridHelper(300, 30, 0xd4c4b0, 0xe8ddd0);
+    grid.position.y = -0.1;
     scene.add(grid);
 
-    stateRef.current = { scene: scene, camera: camera, renderer: renderer, mesh: null, el: el, h: h };
+    var rotX = -0.6, rotY = 0.35, dist = 200;
+    var isDragging = false, prevX = 0, prevY = 0;
+    var center = new THREE.Vector3(0,0,0);
 
-    var theta = 0.6, phi = 0.8, dist = 150;
-    function updateCam() {
+    var updateCam = function() {
       camera.position.set(
-        dist * Math.sin(phi) * Math.cos(theta),
-        dist * Math.sin(phi) * Math.sin(theta),
-        dist * Math.cos(phi)
+        center.x + dist * Math.sin(rotX) * Math.cos(rotY),
+        center.y + dist * Math.sin(rotY),
+        center.z + dist * Math.cos(rotX) * Math.cos(rotY)
       );
-      camera.up.set(0, 0, 1);
-      camera.lookAt(0, 0, 0);
-    }
+      camera.lookAt(center);
+    };
+
+    var getP = function(e) { return e.touches ? e.touches[0] : e; };
+    var onDown = function(e) { isDragging = true; var p = getP(e); prevX = p.clientX; prevY = p.clientY; };
+    var onMove = function(e) {
+      if (!isDragging) return;
+      var p = getP(e);
+      rotX += (p.clientX - prevX) * 0.008;
+      rotY = Math.max(-1.3, Math.min(1.3, rotY + (p.clientY - prevY) * 0.008));
+      prevX = p.clientX; prevY = p.clientY;
+      updateCam();
+    };
+    var onUp = function() { isDragging = false; };
+    var onWheel = function(e) { e.preventDefault(); dist = Math.max(30, Math.min(600, dist + e.deltaY * 0.3)); updateCam(); };
+
+    var cvs = renderer.domElement;
+    cvs.addEventListener("mousedown", onDown);
+    cvs.addEventListener("touchstart", onDown, { passive: true });
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("touchmove", onMove, { passive: true });
+    window.addEventListener("mouseup", onUp);
+    window.addEventListener("touchend", onUp);
+    cvs.addEventListener("wheel", onWheel, { passive: false });
+
+    stateRef.current = {
+      scene: scene, camera: camera, renderer: renderer, center: center, mesh: null, grid: grid,
+      updateDist: function(d) { dist = d; updateCam(); },
+      updateCenter: function(cx,cy,cz) { center.set(cx,cy,cz); grid.position.set(cx,-0.1,cz); updateCam(); }
+    };
     updateCam();
 
-    var dragging = false, lastX = 0, lastY = 0;
-    var onDown = function(e) {
-      dragging = true;
-      var p = e.touches ? e.touches[0] : e;
-      lastX = p.clientX; lastY = p.clientY;
-    };
-    var onMove = function(e) {
-      if (!dragging) return;
-      var p = e.touches ? e.touches[0] : e;
-      theta += (p.clientX - lastX) * 0.01;
-      phi = Math.max(0.1, Math.min(Math.PI - 0.1, phi - (p.clientY - lastY) * 0.01));
-      lastX = p.clientX; lastY = p.clientY;
-      updateCam();
-    };
-    var onUp = function() { dragging = false; };
-    var onWheel = function(e) {
-      e.preventDefault();
-      dist = Math.max(20, Math.min(500, dist + e.deltaY * 0.3));
-      updateCam();
-    };
-
-    var dom = renderer.domElement;
-    dom.addEventListener("mousedown", onDown);
-    dom.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-    dom.addEventListener("wheel", onWheel, { passive: false });
-    dom.addEventListener("touchstart", onDown, { passive: true });
-    dom.addEventListener("touchmove", onMove, { passive: true });
-    dom.addEventListener("touchend", onUp);
-
     var animId;
-    function animate() {
-      animId = requestAnimationFrame(animate);
-      renderer.render(scene, camera);
-    }
+    var animate = function() { animId = requestAnimationFrame(animate); renderer.render(scene, camera); };
     animate();
 
     return function() {
       cancelAnimationFrame(animId);
-      dom.removeEventListener("mousedown", onDown);
-      dom.removeEventListener("mousemove", onMove);
+      cvs.removeEventListener("mousedown", onDown);
+      cvs.removeEventListener("touchstart", onDown);
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("touchmove", onMove);
       window.removeEventListener("mouseup", onUp);
-      dom.removeEventListener("wheel", onWheel);
-      dom.removeEventListener("touchstart", onDown);
-      dom.removeEventListener("touchmove", onMove);
-      dom.removeEventListener("touchend", onUp);
+      window.removeEventListener("touchend", onUp);
+      cvs.removeEventListener("wheel", onWheel);
       renderer.dispose();
-      if (el.contains(dom)) el.removeChild(dom);
     };
   }, []);
 
   useEffect(function() {
-    var st = stateRef.current;
-    if (!st) return;
-    if (st.mesh) { st.scene.remove(st.mesh); st.mesh.geometry.dispose(); st.mesh.material.dispose(); }
-    var tris = props.triangles;
-    if (!tris || tris.length === 0) return;
+    var s = stateRef.current;
+    if (!s.scene) return;
+    if (s.mesh) { s.scene.remove(s.mesh); s.mesh.geometry.dispose(); s.mesh.material.dispose(); }
+    if (!triangles || triangles.length === 0) return;
+
     var geo = new THREE.BufferGeometry();
-    var verts = new Float32Array(tris.length * 3);
-    for (var i = 0; i < tris.length; i++) {
-      verts[i * 3] = tris[i][0];
-      verts[i * 3 + 1] = tris[i][1];
-      verts[i * 3 + 2] = tris[i][2];
+    var verts = new Float32Array(triangles.length * 9);
+    for (var i = 0; i < triangles.length; i++) {
+      for (var j = 0; j < 3; j++) {
+        verts[i*9+j*3+0] = triangles[i][j][0];
+        verts[i*9+j*3+1] = triangles[i][j][2];
+        verts[i*9+j*3+2] = -triangles[i][j][1];
+      }
     }
     geo.setAttribute("position", new THREE.BufferAttribute(verts, 3));
-    geo.computeVertexNormals();
-    geo.center();
-    var mat = new THREE.MeshStandardMaterial({ color: 0xc97d44, roughness: 0.4, metalness: 0.1, side: THREE.DoubleSide });
-    var mesh = new THREE.Mesh(geo, mat);
-    st.scene.add(mesh);
-    st.mesh = mesh;
-  }, [props.triangles]);
 
-  return <div ref={mountRef} style={{ width: "100%", borderRadius: 12, overflow: "hidden", background: "#faf5ef" }} />;
-}
+    var posArr = geo.attributes.position.array;
+    var numVerts = posArr.length / 3;
+    var vertMap = new Map();
+    var uniqueVerts = [];
+    var indices = [];
+    var precision = 10000;
+    for (var vi = 0; vi < numVerts; vi++) {
+      var vx = posArr[vi*3], vy = posArr[vi*3+1], vz = posArr[vi*3+2];
+      var vkey = (Math.round(vx*precision)) + "," + (Math.round(vy*precision)) + "," + (Math.round(vz*precision));
+      if (!vertMap.has(vkey)) {
+        vertMap.set(vkey, uniqueVerts.length / 3);
+        uniqueVerts.push(vx, vy, vz);
+      }
+      indices.push(vertMap.get(vkey));
+    }
+    var indexedGeo = new THREE.BufferGeometry();
+    indexedGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(uniqueVerts), 3));
+    indexedGeo.setIndex(indices);
+    indexedGeo.computeVertexNormals();
 
-// =================== ELLIPSE GENERATION ===================
+    var mat = new THREE.MeshStandardMaterial({
+      color: 0xd4a76a, roughness: 0.4, metalness: 0.05, side: THREE.DoubleSide
+    });
+    var mesh = new THREE.Mesh(indexedGeo, mat);
+    s.scene.add(mesh);
+    s.mesh = mesh;
 
-function generateEllipseContour(cx, cy, rx, ry, numPoints) {
-  var pts = [];
-  for (var i = 0; i < numPoints; i++) {
-    var angle = (2 * Math.PI * i) / numPoints;
-    pts.push([cx + rx * Math.cos(angle), cy + ry * Math.sin(angle)]);
-  }
-  return pts;
+    indexedGeo.computeBoundingBox();
+    var bb = indexedGeo.boundingBox;
+    var ct = new THREE.Vector3(); bb.getCenter(ct);
+    var sz = new THREE.Vector3(); bb.getSize(sz);
+    var maxDim = Math.max(sz.x, sz.y, sz.z);
+    s.updateCenter(ct.x, ct.y, ct.z);
+    s.updateDist(maxDim * 2.2);
+  }, [triangles]);
+
+  return (
+    <div ref={mountRef} style={{
+      width: "100%", height: 340, borderRadius: 12, overflow: "hidden",
+      border: "2px solid #e0d3c3", cursor: "grab", touchAction: "none"
+    }} />
+  );
 }
 
 // =================== MAIN COMPONENT ===================
@@ -654,7 +692,7 @@ export default function TextCircleTool() {
   var _s = useState, _r = useRef, _e = useEffect, _c = useCallback;
 
   var sa = _s("Christian"), text = sa[0], setText = sa[1];
-  var sb = _s(4), fontIdx = sb[0], setFontIdx = sb[1]; // Default to Nunito
+  var sb = _s(4), fontIdx = sb[0], setFontIdx = sb[1];
   var sc = _s(false), bold = sc[0], setBold = sc[1];
   var sd = _s(150), targetWidth = sd[0], setTargetWidth = sd[1];
   var se = _s(5), extrudeHeight = se[0], setExtrudeHeight = se[1];
@@ -672,21 +710,13 @@ export default function TextCircleTool() {
   var sq = _s(null), downloadUrl = sq[0], setDownloadUrl = sq[1];
   var sr = _s(false), generating = sr[0], setGenerating = sr[1];
   var ss = _s(""), fileName = ss[0], setFileName = ss[1];
-  var st = _s(false), fontLoaded = st[0], setFontLoaded = st[1];
-  var su = _s(null), previewDataUrl = su[0], setPreviewDataUrl = su[1];
-  var sv = _s(false), fontSearchOpen = sv[0], setFontSearchOpen = sv[1];
-  var sw = _s(""), fontSearch = sw[0], setFontSearch = sw[1];
+  var st = _s(null), previewDataUrl = st[0], setPreviewDataUrl = st[1];
+  var su = _s(""), fontSearch = su[0], setFontSearch = su[1];
 
-  var canvasRef = _r(null);
-
-  var selectedFont = FONTS[fontIdx];
-
-  // Load initial font
   _e(function() {
-    loadFont(FONTS[fontIdx]).then(function() { setFontLoaded(true); });
+    loadFont(FONTS[fontIdx]);
   }, []);
 
-  // Render text + ellipse to canvas and extract contours
   var renderAndExtract = _c(function() {
     if (!text.trim()) {
       setContours([]);
@@ -700,7 +730,6 @@ export default function TextCircleTool() {
       var cv = document.createElement("canvas");
       var ctx = cv.getContext("2d");
 
-      // Measure text at a base size
       var fontSize = 120;
       var fontWeight = bold ? "bold" : "normal";
       ctx.font = fontWeight + " " + fontSize + "px " + font.family;
@@ -708,7 +737,6 @@ export default function TextCircleTool() {
       var textW = metrics.width;
       var textH = fontSize;
 
-      // Canvas size with padding for the ellipse
       var pad = padding * 3;
       var cw = Math.ceil(textW + pad * 2 + borderThickness * 6);
       var ch = Math.ceil(textH * ellipseRatio + pad * 2 + borderThickness * 6);
@@ -719,7 +747,6 @@ export default function TextCircleTool() {
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, cw, ch);
 
-      // Draw ellipse border
       var ecx = cw / 2;
       var ecy = ch / 2;
       var erx = textW / 2 + pad;
@@ -730,23 +757,19 @@ export default function TextCircleTool() {
       ctx.fillStyle = "#000000";
       ctx.fill();
 
-      // Cut out inner ellipse to make border
       ctx.beginPath();
       ctx.ellipse(ecx, ecy, Math.max(1, erx - borderThickness * 3), Math.max(1, ery - borderThickness * 3), 0, 0, 2 * Math.PI);
       ctx.fillStyle = "#ffffff";
       ctx.fill();
 
-      // Draw text
       ctx.fillStyle = "#000000";
       ctx.font = fontWeight + " " + fontSize + "px " + font.family;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText(text, ecx, ecy);
 
-      // Save preview image
       setPreviewDataUrl(cv.toDataURL());
 
-      // Extract contours using marching squares
       var data = ctx.getImageData(0, 0, cw, ch);
       var binary = new Uint8Array(cw * ch);
       for (var i = 0; i < cw * ch; i++) {
@@ -771,27 +794,12 @@ export default function TextCircleTool() {
     });
   }, [text, fontIdx, bold, padding, ellipseRatio, borderThickness, smoothIter, sharpAngle]);
 
-  // Re-render when params change
   _e(function() {
     renderAndExtract();
   }, [renderAndExtract]);
 
-  // Effective canvas width for scaling
-  var effectiveW = 400; // base reference
-  _e(function() {
-    if (previewDataUrl) {
-      var img = new Image();
-      img.onload = function() {
-        effectiveW = img.width;
-      };
-      img.src = previewDataUrl;
-    }
-  }, [previewDataUrl]);
-
-  // Rebuild preview when mesh settings change
   _e(function() {
     if (contours.length > 0) {
-      // Compute effective width from contour bounds
       var minX = Infinity, maxX = -Infinity;
       for (var ci = 0; ci < contours.length; ci++) {
         for (var pi = 0; pi < contours[ci].length; pi++) {

@@ -985,22 +985,6 @@ export default function ImageToSTL() {
   var hasContours = contours.length > 0;
 
   return (
-    <div style={{
-      minHeight: "100vh", background: "#faf5ef",
-      fontFamily: "'Nunito', 'Segoe UI', sans-serif", color: "#3d2e1f", padding: "16px",
-      display: "flex", flexDirection: "column", alignItems: "center"
-    }}>
-      <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet" />
-
-      <div style={{ textAlign: "center", marginBottom: 20 }}>
-        <h1 style={{ fontSize: 26, fontWeight: 800, margin: 0, color: "#6b4c30" }}>
-          Bild zu STL Umwandler
-        </h1>
-        <p style={{ fontSize: 14, color: "#9a7d5f", margin: "4px 0 0" }}>
-          Verwandle ein Bild in eine 3D-druckbare Form mit runden Kanten
-        </p>
-      </div>
-
       <div style={{ width: "100%", maxWidth: 540, display: "flex", flexDirection: "column", gap: 14 }}>
 
         <div
@@ -1218,12 +1202,6 @@ export default function ImageToSTL() {
           </>
         )}
       </div>
-
-      <div style={{ marginTop: 28, fontSize: 12, color: "#bba88e", textAlign: "center", maxWidth: 440, lineHeight: 1.6 }}>
-        Tipp: Die STL-Datei kann direkt in Bambu Studio, Cura oder PrusaSlicer geladen werden.
-        Die orange Linie zeigt genau, was gedruckt wird.
-      </div>
-    </div>
   );
 }
 

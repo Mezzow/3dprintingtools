@@ -1026,9 +1026,10 @@ export default function TextCircleTool() {
       // === Draw combined shape in black for contour extraction ===
       drawBase("#000000", "#000000");
 
-      // Connectors: hybrid approach
-      // 1. Character boundaries decide WHERE to place bridges (never inside letters)
-      // 2. Pixel scan at bridge height decides HOW FAR to extend (finds actual ink)
+      // Connectors: hybrid approach with flood-fill connection detection
+      // 1. Flood fill detects which characters are already connected (cursive fonts)
+      // 2. Character boundaries decide WHERE to place bridges (never inside letters)
+      // 3. Pixel scan at bridge height decides HOW FAR to extend (finds actual ink)
       ctx.font = fontWeight + " " + fontSize + "px " + font.family;
       var bridgeH = Math.max(4, Math.round(fontSize * 0.06));
       var bY = Math.round(ecy - bridgeH / 2);
@@ -1036,7 +1037,7 @@ export default function TextCircleTool() {
       var textStartX = ecx - textMW / 2;
       var inkOverlap = Math.max(3, Math.round(fontSize * 0.03));
 
-      // Scan a few rows at bridge height for ink detection
+      // Narrow scan band for ink detection when extending bridges
       var scanRows = Math.max(2, Math.round(bridgeH * 0.6));
       var scanTop = Math.round(ecy - scanRows / 2);
       var scanData = ctx.getImageData(0, scanTop, cw, scanRows);
@@ -1048,18 +1049,93 @@ export default function TextCircleTool() {
         return false;
       };
 
+      // Flood-fill connected component analysis across full text height
+      var connBandH = Math.max(10, Math.round(fontSize * 0.9));
+      var connBandTop = Math.max(0, Math.round(ecy - connBandH / 2));
+      var connBandActH = Math.min(ch - connBandTop, connBandH);
+      var connBandData = ctx.getImageData(0, connBandTop, cw, connBandActH);
+      var connGrid = new Uint8Array(cw * connBandActH);
+      for (var gi = 0; gi < cw * connBandActH; gi++) {
+        connGrid[gi] = connBandData.data[gi * 4] < 128 ? 1 : 0;
+      }
+      var floodFillFrom = function(seedX, seedY) {
+        var labels = new Int32Array(cw * connBandActH);
+        if (seedX < 0 || seedX >= cw || seedY < 0 || seedY >= connBandActH) return labels;
+        if (!connGrid[seedY * cw + seedX]) return labels;
+        var stack = [seedX, seedY];
+        labels[seedY * cw + seedX] = 1;
+        while (stack.length > 0) {
+          var sy = stack.pop();
+          var sx = stack.pop();
+          var nb = [[-1,0],[1,0],[0,-1],[0,1]];
+          for (var ni = 0; ni < 4; ni++) {
+            var nx = sx + nb[ni][0], ny = sy + nb[ni][1];
+            if (nx >= 0 && nx < cw && ny >= 0 && ny < connBandActH && connGrid[ny * cw + nx] && !labels[ny * cw + nx]) {
+              labels[ny * cw + nx] = 1;
+              stack.push(nx, ny);
+            }
+          }
+        }
+        return labels;
+      };
+      var findSeedNear = function(centerX) {
+        var x = Math.round(centerX);
+        for (var dx = 0; dx <= 30; dx++) {
+          for (var sign = -1; sign <= 1; sign += 2) {
+            var px = x + sign * dx;
+            if (px < 0 || px >= cw) continue;
+            for (var r = 0; r < connBandActH; r++) {
+              if (connGrid[r * cw + px]) return [px, r];
+            }
+          }
+        }
+        return null;
+      };
+      // Compute character center positions for seed finding
+      var charCenters = [];
+      var cumCharW = 0;
+      for (var ci = 0; ci < line.length; ci++) {
+        var chW = ctx.measureText(line[ci]).width;
+        charCenters.push(textStartX + cumCharW + chW / 2);
+        cumCharW += chW;
+      }
+      // Flood fill from first character
+      var seed0 = findSeedNear(charCenters[0]);
+      var reachable = seed0 ? floodFillFrom(seed0[0], seed0[1]) : new Int32Array(cw * connBandActH);
+
       var gapBridges = [];
       ctx.fillStyle = "#000000";
 
-      // Bridge at each character boundary
+      // Bridge at each character boundary (skip if flood-fill shows connected)
       for (var ci = 1; ci < line.length; ci++) {
         var prefW = ctx.measureText(line.substring(0, ci)).width;
         var bndX = Math.round(textStartX + prefW);
-        // Walk left/right from boundary to find ink at bridge height
-        var leftInk = bndX;
-        while (leftInk > 0 && !hasInkAt(leftInk)) leftInk--;
-        var rightInk = bndX;
-        while (rightInk < cw - 1 && !hasInkAt(rightInk)) rightInk++;
+        // Check if right character is reachable from first character's component
+        var rightSeed = findSeedNear(charCenters[ci]);
+        var isConn = rightSeed ? reachable[rightSeed[1] * cw + rightSeed[0]] === 1 : false;
+        if (isConn) continue;
+        // Not connected — merge this char's component for future checks
+        if (rightSeed) {
+          var newReach = floodFillFrom(rightSeed[0], rightSeed[1]);
+          for (var pi = 0; pi < newReach.length; pi++) {
+            if (newReach[pi]) reachable[pi] = 1;
+          }
+        }
+        // Find the gap at bridge height
+        var leftInk, rightInk;
+        if (hasInkAt(bndX)) {
+          // Boundary is inside a letter body — walk right to exit, then find next letter
+          leftInk = bndX;
+          while (leftInk < cw - 1 && hasInkAt(leftInk)) leftInk++;
+          rightInk = leftInk;
+          while (rightInk < cw - 1 && !hasInkAt(rightInk)) rightInk++;
+          leftInk--;
+        } else {
+          leftInk = bndX;
+          while (leftInk > 0 && !hasInkAt(leftInk)) leftInk--;
+          rightInk = bndX;
+          while (rightInk < cw - 1 && !hasInkAt(rightInk)) rightInk++;
+        }
         var bx = leftInk - inkOverlap;
         var bx2 = rightInk + inkOverlap;
         var bwidth = bx2 - bx;

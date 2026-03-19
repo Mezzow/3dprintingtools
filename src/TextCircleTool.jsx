@@ -1026,49 +1026,94 @@ export default function TextCircleTool() {
       // === Draw combined shape in black for contour extraction ===
       drawBase("#000000", "#000000");
 
-      // Smart connectors: scan for gaps at text center and bridge only where needed
-      var bridgeH = 3;
+      // Smart connectors: only bridge actual gaps between letters and between text/ring
+      // Uses tall scan band (85% of font height) so internal letter features
+      // (like the gap inside W or M) are covered by pixels at other heights
+      var bridgeH = Math.max(4, Math.round(fontSize * 0.05));
       ctx.font = fontWeight + " " + fontSize + "px " + font.family;
       var textMW = ctx.measureText(line).width;
-      // Scan region spans from outer ring edge to outer ring edge (or text edge, whichever is wider)
-      var scanLeft = Math.max(0, Math.floor(Math.min(ecx - erx, ecx - textMW / 2) - 2));
-      var scanRight = Math.min(cw, Math.ceil(Math.max(ecx + erx, ecx + textMW / 2) + 2));
-      var scanW = scanRight - scanLeft;
-      var scanBandH = Math.max(6, Math.round(fontSize * 0.4));
-      var scanTop = Math.max(0, Math.round(ecy - scanBandH / 2));
-      var scanActualH = Math.min(ch - scanTop, scanBandH);
+      var textStartX = ecx - textMW / 2;
+
+      // Full scan region: outer ring edge to outer ring edge
+      var fullLeft = Math.max(0, Math.floor(Math.min(ecx - erx, textStartX) - 5));
+      var fullRight = Math.min(cw, Math.ceil(Math.max(ecx + erx, textStartX + textMW) + 5));
+      var fullW = fullRight - fullLeft;
+      // Tall band covers most of the letter body — avoids detecting internal letter features
+      var bandH = Math.max(10, Math.round(fontSize * 0.85));
+      var bandTop = Math.max(0, Math.round(ecy - bandH / 2));
+      var bandActH = Math.min(ch - bandTop, bandH);
 
       var gapBridges = [];
-      if (scanW > 0 && scanActualH > 0) {
-        var sd = ctx.getImageData(scanLeft, scanTop, scanW, scanActualH);
-        var colDark = new Array(scanW);
-        for (var c = 0; c < scanW; c++) {
-          colDark[c] = false;
-          for (var r = 0; r < scanActualH; r++) {
-            if (sd.data[(r * scanW + c) * 4] < 128) {
-              colDark[c] = true;
+      if (fullW > 0 && bandActH > 0) {
+        var fd = ctx.getImageData(fullLeft, bandTop, fullW, bandActH);
+        // Build column darkness map using the tall scan band
+        var colDark = new Uint8Array(fullW);
+        for (var c = 0; c < fullW; c++) {
+          for (var r = 0; r < bandActH; r++) {
+            if (fd.data[(r * fullW + c) * 4] < 128) {
+              colDark[c] = 1;
               break;
             }
           }
         }
 
-        // Find gaps between dark regions and bridge them
-        var seenDark = false, inGap = false, gapStart = 0;
+        // Only check for gaps at character boundary positions
+        // This avoids bridging internal letter features entirely
         ctx.fillStyle = "#000000";
-        for (var c2 = 0; c2 < scanW; c2++) {
-          if (colDark[c2]) {
-            if (!seenDark) seenDark = true;
-            if (inGap) {
-              // Bridge this gap with thin strip, overlapping 2px into dark on each side
-              var gX = scanLeft + gapStart - 2;
-              var gW = c2 - gapStart + 4;
-              ctx.fillRect(gX, ecy - bridgeH / 2, gW, bridgeH);
-              gapBridges.push([gX, ecy - bridgeH / 2, gW, bridgeH]);
-              inGap = false;
-            }
-          } else if (seenDark && !inGap) {
-            inGap = true;
-            gapStart = c2;
+        for (var ci = 1; ci < line.length; ci++) {
+          var prefW = ctx.measureText(line.substring(0, ci)).width;
+          var bndX = Math.round(textStartX + prefW) - fullLeft;
+          if (bndX < 2 || bndX >= fullW - 2) continue;
+
+          // Check 3px window at this character boundary
+          var anyDk = false;
+          for (var cx = bndX - 1; cx <= bndX + 1; cx++) {
+            if (cx >= 0 && cx < fullW && colDark[cx]) { anyDk = true; break; }
+          }
+
+          if (!anyDk) {
+            // Gap at this character boundary — find its extent
+            var gl = bndX, gr = bndX;
+            while (gl > 0 && !colDark[gl - 1]) gl--;
+            while (gr < fullW - 1 && !colDark[gr + 1]) gr++;
+
+            // Bridge: overlap 2px into each letter edge
+            var gX = fullLeft + gl - 2;
+            var gW = (gr - gl) + 5;
+            ctx.fillRect(gX, ecy - bridgeH / 2, gW, bridgeH);
+            gapBridges.push([gX, ecy - bridgeH / 2, gW, bridgeH]);
+          }
+        }
+
+        // Bridge text-to-ring on left side if there's a gap
+        var ringInnerLeftRel = Math.round(ecx - irx) - fullLeft;
+        var textLeftRel = Math.round(textStartX) - fullLeft;
+        if (textLeftRel > ringInnerLeftRel + 3) {
+          var leftGap = false;
+          for (var lx = ringInnerLeftRel; lx < Math.min(textLeftRel, fullW); lx++) {
+            if (lx >= 0 && lx < fullW && !colDark[lx]) { leftGap = true; break; }
+          }
+          if (leftGap) {
+            var lbX = fullLeft + Math.max(0, ringInnerLeftRel - Math.ceil(borderPx * 0.3));
+            var lbW = fullLeft + textLeftRel + 3 - lbX;
+            ctx.fillRect(lbX, ecy - bridgeH / 2, lbW, bridgeH);
+            gapBridges.push([lbX, ecy - bridgeH / 2, lbW, bridgeH]);
+          }
+        }
+
+        // Bridge text-to-ring on right side if there's a gap
+        var ringInnerRightRel = Math.round(ecx + irx) - fullLeft;
+        var textRightRel = Math.round(textStartX + textMW) - fullLeft;
+        if (textRightRel < ringInnerRightRel - 3) {
+          var rightGap = false;
+          for (var rx = textRightRel; rx < Math.min(ringInnerRightRel, fullW); rx++) {
+            if (rx >= 0 && rx < fullW && !colDark[rx]) { rightGap = true; break; }
+          }
+          if (rightGap) {
+            var rbX = fullLeft + textRightRel - 3;
+            var rbW = fullLeft + Math.min(fullW, ringInnerRightRel + Math.ceil(borderPx * 0.3)) - rbX;
+            ctx.fillRect(rbX, ecy - bridgeH / 2, rbW, bridgeH);
+            gapBridges.push([rbX, ecy - bridgeH / 2, rbW, bridgeH]);
           }
         }
       }
@@ -1079,13 +1124,13 @@ export default function TextCircleTool() {
 
       // === PREVIEW IMAGE: redraw with visual distinction ===
       drawBase("#555555", "#000000");
-      // Show bridges subtly in preview
-      ctx.fillStyle = "#888888";
+      // Show connectors subtly in preview
+      ctx.fillStyle = "#aaaaaa";
       for (var bi = 0; bi < gapBridges.length; bi++) {
         var b = gapBridges[bi];
         ctx.fillRect(b[0], b[1], b[2], b[3]);
       }
-      // Draw ring outline for clarity
+      // Ring outlines for clarity
       ctx.beginPath();
       ctx.ellipse(ecx, ecy, erx, ery, 0, 0, 2 * Math.PI);
       ctx.strokeStyle = "#444444";

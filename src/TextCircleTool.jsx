@@ -1027,83 +1027,49 @@ export default function TextCircleTool() {
       drawBase("#000000", "#000000");
 
       // Connectors: scan the rendered image for pixel gaps and bridge them.
-      // Strategy: use a thin horizontal band at bridge height to detect gaps
-      // exactly where the bridge will be placed, with a moderate threshold
-      // that ignores faint anti-aliasing. Max gap width prevents bridging
-      // internal letter features (like inside "o" or "e").
+      // Uses tall scan band (90% of font height) so internal letter features
+      // (like the hole in o/e) are covered by pixels at other heights.
+      // Generous overlap ensures bridges visually connect to letter strokes.
       var bridgeH = Math.max(4, Math.round(fontSize * 0.06));
-      var maxGapW = Math.round(fontSize * 0.25); // don't bridge gaps wider than this
+      var bridgeOverlap = Math.max(4, Math.round(fontSize * 0.1));
 
       // Scan region: outer ring edge to outer ring edge
       var fullLeft = Math.max(0, Math.floor(ecx - erx - 5));
       var fullRight = Math.min(cw, Math.ceil(ecx + erx + 5));
       var fullW = fullRight - fullLeft;
-
-      // Thin band at vertical center — exactly where the bridge sits
-      var scanH = Math.max(6, bridgeH + 4);
-      var scanTop = Math.max(0, Math.round(ecy - scanH / 2));
-      var scanActH = Math.min(ch - scanTop, scanH);
-
-      // Also a tall band for a "solid body" map — used to extend bridges
-      var tallH = Math.max(10, Math.round(fontSize * 0.9));
-      var tallTop = Math.max(0, Math.round(ecy - tallH / 2));
-      var tallActH = Math.min(ch - tallTop, tallH);
+      var bandH = Math.max(10, Math.round(fontSize * 0.9));
+      var bandTop = Math.max(0, Math.round(ecy - bandH / 2));
+      var bandActH = Math.min(ch - bandTop, bandH);
 
       var gapBridges = [];
-      if (fullW > 0 && scanActH > 0 && tallActH > 0) {
-        // Thin band: detect gaps at bridge height
-        var sd = ctx.getImageData(fullLeft, scanTop, fullW, scanActH);
-        var colInk = new Uint8Array(fullW); // has visible ink at bridge height
+      if (fullW > 0 && bandActH > 0) {
+        var fd = ctx.getImageData(fullLeft, bandTop, fullW, bandActH);
+        // Column is "dark" if ANY pixel in the tall band has value < 128
+        var colDark = new Uint8Array(fullW);
         for (var c = 0; c < fullW; c++) {
-          for (var r = 0; r < scanActH; r++) {
-            if (sd.data[(r * fullW + c) * 4] < 128) {
-              colInk[c] = 1;
+          for (var r = 0; r < bandActH; r++) {
+            if (fd.data[(r * fullW + c) * 4] < 128) {
+              colDark[c] = 1;
               break;
             }
           }
         }
 
-        // Tall band: find solid letter body for bridge extension
-        var td = ctx.getImageData(fullLeft, tallTop, fullW, tallActH);
-        var colSolid = new Uint8Array(fullW);
-        for (var c = 0; c < fullW; c++) {
-          for (var r = 0; r < tallActH; r++) {
-            if (td.data[(r * fullW + c) * 4] < 32) {
-              colSolid[c] = 1;
-              break;
-            }
-          }
-        }
-
-        // Find gaps: runs of non-ink columns in the thin band
+        // Find gaps: runs of non-dark columns between dark regions
         ctx.fillStyle = "#000000";
         var inGap = false;
         var gapStart = 0;
         for (var c = 0; c <= fullW; c++) {
-          var ink = c < fullW ? colInk[c] : 1;
-          if (!ink && !inGap) {
+          var dark = c < fullW ? colDark[c] : 1;
+          if (!dark && !inGap) {
             inGap = true;
             gapStart = c;
-          } else if (ink && inGap) {
+          } else if (dark && inGap) {
             inGap = false;
-            var gapW = c - gapStart;
-            // Skip gaps too wide (internal letter features) or at edges
-            if (gapW > maxGapW) continue;
-            // Must have solid material within reach on both sides
-            var solidL = -1, solidR = -1;
-            for (var sl = gapStart - 1; sl >= 0 && sl >= gapStart - 30; sl--) {
-              if (colSolid[sl]) { solidL = sl; break; }
-            }
-            for (var sr = c; sr < fullW && sr <= c + 30; sr++) {
-              if (colSolid[sr]) { solidR = sr; break; }
-            }
-            if (solidL >= 0 && solidR >= 0) {
-              // Bridge from a few px into left solid body to a few px into right
-              var extra = Math.max(2, Math.round(fontSize * 0.02));
-              var bL = Math.max(0, solidL - extra);
-              var bR = Math.min(fullW - 1, solidR + extra);
-              var gX = fullLeft + bL;
-              var gW = bR - bL + 1;
+            // Only bridge if dark material exists on both sides
+            if (gapStart > 0 && c < fullW) {
+              var gX = fullLeft + gapStart - bridgeOverlap;
+              var gW = (c - gapStart) + bridgeOverlap * 2;
               var gY = Math.round(ecy - bridgeH / 2);
               ctx.fillRect(gX, gY, gW, bridgeH);
               gapBridges.push([gX, gY, gW, bridgeH]);

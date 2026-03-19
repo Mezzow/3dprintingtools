@@ -1026,56 +1026,73 @@ export default function TextCircleTool() {
       // === Draw combined shape in black for contour extraction ===
       drawBase("#000000", "#000000");
 
-      // Connectors: scan the rendered image for pixel gaps and bridge them.
-      // Uses tall scan band (90% of font height) so internal letter features
-      // (like the hole in o/e) are covered by pixels at other heights.
-      // Generous overlap ensures bridges visually connect to letter strokes.
+      // Connectors: hybrid approach
+      // 1. Character boundaries decide WHERE to place bridges (never inside letters)
+      // 2. Pixel scan at bridge height decides HOW FAR to extend (finds actual ink)
+      ctx.font = fontWeight + " " + fontSize + "px " + font.family;
       var bridgeH = Math.max(4, Math.round(fontSize * 0.06));
-      var bridgeOverlap = Math.max(6, Math.round(fontSize * 0.25));
+      var bY = Math.round(ecy - bridgeH / 2);
+      var textMW = ctx.measureText(line).width;
+      var textStartX = ecx - textMW / 2;
+      var inkOverlap = Math.max(3, Math.round(fontSize * 0.03));
 
-      // Scan region: outer ring edge to outer ring edge
-      var fullLeft = Math.max(0, Math.floor(ecx - erx - 5));
-      var fullRight = Math.min(cw, Math.ceil(ecx + erx + 5));
-      var fullW = fullRight - fullLeft;
-      var bandH = Math.max(10, Math.round(fontSize * 0.9));
-      var bandTop = Math.max(0, Math.round(ecy - bandH / 2));
-      var bandActH = Math.min(ch - bandTop, bandH);
+      // Scan a few rows at bridge height for ink detection
+      var scanRows = Math.max(2, Math.round(bridgeH * 0.6));
+      var scanTop = Math.round(ecy - scanRows / 2);
+      var scanData = ctx.getImageData(0, scanTop, cw, scanRows);
+      var hasInkAt = function(x) {
+        if (x < 0 || x >= cw) return false;
+        for (var r = 0; r < scanRows; r++) {
+          if (scanData.data[(r * cw + x) * 4] < 128) return true;
+        }
+        return false;
+      };
 
       var gapBridges = [];
-      if (fullW > 0 && bandActH > 0) {
-        var fd = ctx.getImageData(fullLeft, bandTop, fullW, bandActH);
-        // Column is "dark" if ANY pixel in the tall band has value < 128
-        var colDark = new Uint8Array(fullW);
-        for (var c = 0; c < fullW; c++) {
-          for (var r = 0; r < bandActH; r++) {
-            if (fd.data[(r * fullW + c) * 4] < 128) {
-              colDark[c] = 1;
-              break;
-            }
-          }
-        }
+      ctx.fillStyle = "#000000";
 
-        // Find gaps: runs of non-dark columns between dark regions
-        ctx.fillStyle = "#000000";
-        var inGap = false;
-        var gapStart = 0;
-        for (var c = 0; c <= fullW; c++) {
-          var dark = c < fullW ? colDark[c] : 1;
-          if (!dark && !inGap) {
-            inGap = true;
-            gapStart = c;
-          } else if (dark && inGap) {
-            inGap = false;
-            // Only bridge if dark material exists on both sides
-            if (gapStart > 0 && c < fullW) {
-              var gX = fullLeft + gapStart - bridgeOverlap;
-              var gW = (c - gapStart) + bridgeOverlap * 2;
-              var gY = Math.round(ecy - bridgeH / 2);
-              ctx.fillRect(gX, gY, gW, bridgeH);
-              gapBridges.push([gX, gY, gW, bridgeH]);
-            }
-          }
+      // Bridge at each character boundary
+      for (var ci = 1; ci < line.length; ci++) {
+        var prefW = ctx.measureText(line.substring(0, ci)).width;
+        var bndX = Math.round(textStartX + prefW);
+        // Walk left/right from boundary to find ink at bridge height
+        var leftInk = bndX;
+        while (leftInk > 0 && !hasInkAt(leftInk)) leftInk--;
+        var rightInk = bndX;
+        while (rightInk < cw - 1 && !hasInkAt(rightInk)) rightInk++;
+        var bx = leftInk - inkOverlap;
+        var bx2 = rightInk + inkOverlap;
+        var bwidth = bx2 - bx;
+        if (bwidth > 0) {
+          ctx.fillRect(bx, bY, bwidth, bridgeH);
+          gapBridges.push([bx, bY, bwidth, bridgeH]);
         }
+      }
+
+      // Text-to-ring bridges
+      var ringInnerLeft = Math.round(ecx - irx);
+      var ringInnerRight = Math.round(ecx + irx);
+      // Left side
+      var leftTextInk = Math.round(textStartX);
+      while (leftTextInk < ecx && !hasInkAt(leftTextInk)) leftTextInk++;
+      var leftRingInk = ringInnerLeft;
+      while (leftRingInk > 0 && !hasInkAt(leftRingInk)) leftRingInk--;
+      if (leftTextInk > leftRingInk + 3) {
+        var lbx = leftRingInk - inkOverlap;
+        var lbw = leftTextInk + inkOverlap - lbx;
+        ctx.fillRect(lbx, bY, lbw, bridgeH);
+        gapBridges.push([lbx, bY, lbw, bridgeH]);
+      }
+      // Right side
+      var rightTextInk = Math.round(textStartX + textMW);
+      while (rightTextInk > ecx && !hasInkAt(rightTextInk)) rightTextInk--;
+      var rightRingInk = ringInnerRight;
+      while (rightRingInk < cw - 1 && !hasInkAt(rightRingInk)) rightRingInk++;
+      if (rightTextInk < rightRingInk - 3) {
+        var rbx = rightTextInk - inkOverlap;
+        var rbw = rightRingInk + inkOverlap - rbx;
+        ctx.fillRect(rbx, bY, rbw, bridgeH);
+        gapBridges.push([rbx, bY, rbw, bridgeH]);
       }
 
       // Single-pass contour extraction from the combined shape

@@ -58,49 +58,87 @@ async function main() {
 
   drawBase("#000000", "#000000");
 
-  // === CONNECTOR LOGIC ===
+  // === HYBRID CONNECTOR LOGIC ===
+  // 1. Use character boundaries to decide WHERE to place bridges
+  //    (avoids internal letter features)
+  // 2. Use pixel scanning at bridge height to decide HOW FAR to extend
+  //    (guarantees connection to actual letter strokes)
+  ctx.font = fontWeight + " " + fontSize + "px " + fontFamily;
   var bridgeH = Math.max(4, Math.round(fontSize * 0.06));
-  // Generous overlap — since bridges are same color as letters, overlap is invisible
-  var bridgeOverlap = Math.max(6, Math.round(fontSize * 0.25));
+  var bY = Math.round(ecy - bridgeH / 2);
+  var textW = ctx.measureText(text).width;
+  var textStartX = ecx - textW / 2;
+  var overlap = Math.max(3, Math.round(fontSize * 0.03)); // px past ink edge
 
-  var fullLeft = Math.max(0, Math.floor(ecx - erx - 5));
-  var fullRight = Math.min(cw, Math.ceil(ecx + erx + 5));
-  var fullW = fullRight - fullLeft;
-  // Tall band (90% font height): internal features like "o" holes have dark pixels
-  // at top/bottom arcs, so those columns stay dark and don't create false gaps
-  var bandH = Math.max(10, Math.round(fontSize * 0.9));
-  var bandTop = Math.max(0, Math.round(ecy - bandH / 2));
-  var bandActH = Math.min(ch - bandTop, bandH);
+  // Scan a band at bridge height for ink detection
+  // Use multiple rows for robustness
+  var scanRows = Math.max(2, Math.round(bridgeH * 0.6));
+  var scanTop = Math.round(ecy - scanRows / 2);
+  var scanData = ctx.getImageData(0, scanTop, cw, scanRows);
 
-  console.log("bridgeH:", bridgeH, "bridgeOverlap:", bridgeOverlap);
+  // Check if a column has ink at bridge height
+  function hasInkAt(x) {
+    if (x < 0 || x >= cw) return false;
+    for (var r = 0; r < scanRows; r++) {
+      if (scanData.data[(r * cw + x) * 4] < 128) return true;
+    }
+    return false;
+  }
 
   var gapBridges = [];
-  if (fullW > 0 && bandActH > 0) {
-    var fd = ctx.getImageData(fullLeft, bandTop, fullW, bandActH);
-    var colDark = new Uint8Array(fullW);
-    for (var c = 0; c < fullW; c++) {
-      for (var r = 0; r < bandActH; r++) {
-        if (fd.data[(r * fullW + c) * 4] < 128) { colDark[c] = 1; break; }
-      }
-    }
+  ctx.fillStyle = "#000000";
 
-    ctx.fillStyle = "#000000";
-    var inGap = false, gapStart = 0;
-    for (var c = 0; c <= fullW; c++) {
-      var dark = c < fullW ? colDark[c] : 1;
-      if (!dark && !inGap) { inGap = true; gapStart = c; }
-      else if (dark && inGap) {
-        inGap = false;
-        if (gapStart > 0 && c < fullW) {
-          var gX = fullLeft + gapStart - bridgeOverlap;
-          var gW = (c - gapStart) + bridgeOverlap * 2;
-          var gY = Math.round(ecy - bridgeH / 2);
-          ctx.fillRect(gX, gY, gW, bridgeH);
-          gapBridges.push([gX, gY, gW, bridgeH]);
-          console.log("Gap col " + gapStart + "-" + (c-1) + " (w=" + (c-gapStart) + ") -> rect(" + gX + "," + gY + "," + gW + "," + bridgeH + ")");
-        }
-      }
+  for (var ci = 1; ci < text.length; ci++) {
+    var prefW = ctx.measureText(text.substring(0, ci)).width;
+    var bndX = Math.round(textStartX + prefW);
+
+    // Walk LEFT from boundary to find left letter's ink at bridge height
+    var leftInk = bndX;
+    while (leftInk > 0 && !hasInkAt(leftInk)) leftInk--;
+    // Walk RIGHT from boundary to find right letter's ink at bridge height
+    var rightInk = bndX;
+    while (rightInk < cw - 1 && !hasInkAt(rightInk)) rightInk++;
+
+    // Bridge: from overlap pixels past left ink to overlap pixels past right ink
+    var bx = leftInk - overlap;
+    var bx2 = rightInk + overlap;
+    var bwidth = bx2 - bx;
+
+    if (bwidth > 0) {
+      ctx.fillRect(bx, bY, bwidth, bridgeH);
+      gapBridges.push([bx, bY, bwidth, bridgeH]);
+      console.log("'" + text[ci-1] + "|" + text[ci] + "' bnd=" + bndX + " ink=" + leftInk + ".." + rightInk + " -> rect(" + bx + "," + bY + "," + bwidth + "," + bridgeH + ")");
     }
+  }
+
+  // Text-to-ring bridges
+  var ringInnerLeft = Math.round(ecx - irx);
+  var ringInnerRight = Math.round(ecx + irx);
+
+  // Left: find leftmost text ink, bridge to ring
+  var leftTextInk = Math.round(textStartX);
+  while (leftTextInk < ecx && !hasInkAt(leftTextInk)) leftTextInk++;
+  var leftRingInk = ringInnerLeft;
+  while (leftRingInk > 0 && !hasInkAt(leftRingInk)) leftRingInk--;
+  if (leftTextInk > leftRingInk + 3) {
+    var lbx = leftRingInk - overlap;
+    var lbw = leftTextInk + overlap - lbx;
+    ctx.fillRect(lbx, bY, lbw, bridgeH);
+    gapBridges.push([lbx, bY, lbw, bridgeH]);
+    console.log("Left ring bridge: ring=" + leftRingInk + " text=" + leftTextInk + " -> rect(" + lbx + "," + bY + "," + lbw + "," + bridgeH + ")");
+  }
+
+  // Right: find rightmost text ink, bridge to ring
+  var rightTextInk = Math.round(textStartX + textW);
+  while (rightTextInk > ecx && !hasInkAt(rightTextInk)) rightTextInk--;
+  var rightRingInk = ringInnerRight;
+  while (rightRingInk < cw - 1 && !hasInkAt(rightRingInk)) rightRingInk++;
+  if (rightTextInk < rightRingInk - 3) {
+    var rbx = rightTextInk - overlap;
+    var rbw = rightRingInk + overlap - rbx;
+    ctx.fillRect(rbx, bY, rbw, bridgeH);
+    gapBridges.push([rbx, bY, rbw, bridgeH]);
+    console.log("Right ring bridge: text=" + rightTextInk + " ring=" + rightRingInk + " -> rect(" + rbx + "," + bY + "," + rbw + "," + bridgeH + ")");
   }
 
   console.log("Total bridges:", gapBridges.length);

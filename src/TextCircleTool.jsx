@@ -678,70 +678,27 @@ function extractContoursFromCanvas(ctx, cw, ch, smoothIter, sharpAngle) {
   return processed.filter(function(c) { return c.length >= 6; });
 }
 
-function generateBridgeBox(x1, x2, y, halfH, height, scale, imgW) {
-  // Generate a rectangular prism (box) as triangles for a connector bridge
-  var s = scale;
-  var ax = x1 * s, bx = x2 * s;
-  var ay = (y - halfH) * s, by = (y + halfH) * s;
-  var tris = [];
-  // 6 faces, 2 triangles each = 12 triangles
-  var p = [
-    [ax, ay, 0], [bx, ay, 0], [bx, by, 0], [ax, by, 0],       // bottom (z=0)
-    [ax, ay, height], [bx, ay, height], [bx, by, height], [ax, by, height]  // top (z=height)
-  ];
-  // Bottom face
-  tris.push([p[0], p[2], p[1]]); tris.push([p[0], p[3], p[2]]);
-  // Top face
-  tris.push([p[4], p[5], p[6]]); tris.push([p[4], p[6], p[7]]);
-  // Front face (y=ay)
-  tris.push([p[0], p[1], p[5]]); tris.push([p[0], p[5], p[4]]);
-  // Back face (y=by)
-  tris.push([p[2], p[3], p[7]]); tris.push([p[2], p[7], p[6]]);
-  // Left face (x=ax)
-  tris.push([p[0], p[4], p[7]]); tris.push([p[0], p[7], p[3]]);
-  // Right face (x=bx)
-  tris.push([p[1], p[2], p[6]]); tris.push([p[1], p[6], p[5]]);
-  return tris;
-}
 
-function buildTriangles(contours, mode, targetWidth, imgW, wallThickness, extrudeHeight, bevelSteps, bevelBottom, bridges) {
+function buildTriangles(contours, targetWidth, imgW, extrudeHeight, bevelSteps, bevelBottom) {
   var scale = targetWidth / (imgW || 100);
   var allTris = [];
 
-  if (mode === "frame") {
-    for (var ci = 0; ci < contours.length; ci++) {
+  // Solid mode: classify contours into outers and holes for proper cap generation
+  var classified = classifyContours(contours);
+
+  for (var oi = 0; oi < classified.length; oi++) {
+    var outer = classified[oi];
+    var holeContours = outer.children.map(function(h) { return h.contour; });
+
+    // Outer contour: walls + caps with holes subtracted
+    allTris = allTris.concat(
+      generateSolidMesh(outer.contour, extrudeHeight, scale, bevelSteps, bevelBottom, holeContours, false)
+    );
+
+    // Hole contours: walls only (caps handled by outer's merged polygon)
+    for (var hi = 0; hi < holeContours.length; hi++) {
       allTris = allTris.concat(
-        generateFrameMesh(contours[ci], wallThickness, extrudeHeight, scale, bevelSteps, bevelBottom)
-      );
-    }
-  } else {
-    // Solid mode: classify contours into outers and holes for proper cap generation
-    var classified = classifyContours(contours);
-
-    for (var oi = 0; oi < classified.length; oi++) {
-      var outer = classified[oi];
-      var holeContours = outer.children.map(function(h) { return h.contour; });
-
-      // Outer contour: walls + caps with holes subtracted
-      allTris = allTris.concat(
-        generateSolidMesh(outer.contour, extrudeHeight, scale, bevelSteps, bevelBottom, holeContours, false)
-      );
-
-      // Hole contours: walls only (caps handled by outer's merged polygon)
-      for (var hi = 0; hi < holeContours.length; hi++) {
-        allTris = allTris.concat(
-          generateSolidMesh(holeContours[hi], extrudeHeight, scale, bevelSteps, bevelBottom, null, true)
-        );
-      }
-    }
-  }
-
-  // Add connector bridge geometry (text-to-ring bridges)
-  if (bridges && bridges.length > 0) {
-    for (var bi = 0; bi < bridges.length; bi++) {
-      var br = bridges[bi];
-      allTris = allTris.concat(
-        generateBridgeBox(br.x1, br.x2, br.y, br.halfH, extrudeHeight, scale, imgW)
+        generateSolidMesh(holeContours[hi], extrudeHeight, scale, bevelSteps, bevelBottom, null, true)
       );
     }
   }
@@ -905,18 +862,15 @@ function Preview3D({ triangles }) {
 export default function TextCircleTool() {
   var _s = useState, _r = useRef, _e = useEffect, _c = useCallback;
 
-  var sa = _s("Hand\nin\nHand"), text = sa[0], setText = sa[1];
+  var sa = _s("Willkommen"), text = sa[0], setText = sa[1];
   var sb = _s(4), fontIdx = sb[0], setFontIdx = sb[1];
   var sc = _s(false), bold = sc[0], setBold = sc[1];
   var sd = _s(150), targetWidth = sd[0], setTargetWidth = sd[1];
   var se = _s(5), extrudeHeight = se[0], setExtrudeHeight = se[1];
-  var sf = _s(2.0), wallThickness = sf[0], setWallThickness = sf[1];
-  var sg = _s("solid"), mode = sg[0], setMode = sg[1];
   var sh = _s(4), bevelSteps = sh[0], setBevelSteps = sh[1];
   var si = _s(false), bevelBottom = si[0], setBevelBottom = si[1];
   var sj = _s(2), smoothIter = sj[0], setSmoothIter = sj[1];
   var sk = _s(120), sharpAngle = sk[0], setSharpAngle = sk[1];
-  var sl = _s(20), padding = sl[0], setPadding = sl[1];
   var sm = _s(1.3), ellipseRatio = sm[0], setEllipseRatio = sm[1];
   var sn = _s(2.0), borderThickness = sn[0], setBorderThickness = sn[1];
   var so = _s([]), contours = so[0], setContours = so[1];
@@ -930,7 +884,6 @@ export default function TextCircleTool() {
   var sw = _s(true), enableConnectors = sw[0], setEnableConnectors = sw[1];
   var sx = _s(2.0), connectorThickness = sx[0], setConnectorThickness = sx[1];
   var sy = _s(0), textYOffset = sy[0], setTextYOffset = sy[1];
-  var sz = _s([]), connectorBridges = sz[0], setConnectorBridges = sz[1];
 
   _e(function() {
     loadFont(FONTS[fontIdx]);
@@ -947,8 +900,8 @@ export default function TextCircleTool() {
   };
 
   var renderAndExtract = _c(function() {
-    var lines = text.split("\n").filter(function(l) { return l.trim(); });
-    if (lines.length === 0) {
+    var line = text.trim();
+    if (!line) {
       setContours([]);
       setPreviewTris([]);
       setPreviewDataUrl(null);
@@ -977,11 +930,18 @@ export default function TextCircleTool() {
       var irx = Math.max(1, erx - borderPx);
       var iry = Math.max(1, ery - borderPx);
 
+      // Compute font size to fit text within inner ellipse width
+      var availW = 2 * irx * textOverlap;
+      var fontSize = computeFontSizeForWidth(ctx, font.family, fontWeight, line, availW);
+      fontSize = Math.max(16, Math.min(fontSize, iry * 1.5));
+
+      // === Single-pass render: draw everything on one canvas ===
+
       // 1. White background
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, cw, ch);
 
-      // 2. Black outer ellipse
+      // 2. Black filled outer ellipse
       ctx.beginPath();
       ctx.ellipse(ecx, ecy, erx, ery, 0, 0, 2 * Math.PI);
       ctx.fillStyle = "#000000";
@@ -993,71 +953,23 @@ export default function TextCircleTool() {
       ctx.fillStyle = "#ffffff";
       ctx.fill();
 
-      // 4. Compute line positions and font sizes
-      var numLines = lines.length;
-      var lineSpacing = padding * 2;
-      var totalTextHeight;
-      // Estimate line height with a test font size
-      ctx.font = fontWeight + " 100px " + font.family;
-      var testMetrics = ctx.measureText("Mg");
-      var lineHeightRatio = 1.2; // approximate line height to font size ratio
-
-      // Distribute lines vertically centered in the ellipse
-      var lineInfos = [];
-      // First pass: compute rough font sizes to estimate total height
-      var roughSizes = [];
-      for (var li = 0; li < numLines; li++) {
-        // Assume even vertical distribution for first pass
-        var roughY = ecy + ((li - (numLines - 1) / 2) * 100);
-        var dy = roughY - ecy;
-        var availW = 2 * irx * Math.sqrt(Math.max(0.01, 1 - (dy * dy) / (iry * iry)));
-        var fs = computeFontSizeForWidth(ctx, font.family, fontWeight, lines[li], availW * textOverlap);
-        roughSizes.push(Math.min(fs, iry * 2 / numLines));
-      }
-
-      // Compute total height and spacing
-      var avgSize = roughSizes.reduce(function(a, b) { return a + b; }, 0) / roughSizes.length;
-      var lineStep = avgSize * lineHeightRatio + lineSpacing;
-      totalTextHeight = lineStep * (numLines - 1);
-
-      // Second pass: compute actual positions and font sizes
-      for (var li2 = 0; li2 < numLines; li2++) {
-        var lineY = ecy + (li2 - (numLines - 1) / 2) * lineStep;
-        var dy2 = lineY - ecy;
-        // Available width at this y-position from ellipse equation
-        var ratioSq = (dy2 * dy2) / (iry * iry);
-        var availW2 = ratioSq >= 1 ? irx * 0.5 : 2 * irx * Math.sqrt(1 - ratioSq);
-        var fontSize = computeFontSizeForWidth(ctx, font.family, fontWeight, lines[li2], availW2 * textOverlap);
-        fontSize = Math.max(16, Math.min(fontSize, iry * 1.5));
-        lineInfos.push({ text: lines[li2], y: lineY, fontSize: fontSize });
-      }
-
-      // 5. Draw text lines in black
+      // 4. Draw filled text in black
       ctx.fillStyle = "#000000";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      for (var li3 = 0; li3 < lineInfos.length; li3++) {
-        var info = lineInfos[li3];
-        ctx.font = fontWeight + " " + info.fontSize + "px " + font.family;
-        ctx.fillText(info.text, ecx, info.y);
-      }
+      ctx.font = fontWeight + " " + fontSize + "px " + font.family;
+      ctx.fillText(line, ecx, ecy);
 
-      // 5b. Draw letter-to-letter connectors only where actual pixel gaps exist
-      ctx.fillStyle = "#000000";
-      for (var li5 = 0; li5 < lineInfos.length; li5++) {
-        var inf2 = lineInfos[li5];
-        ctx.font = fontWeight + " " + inf2.fontSize + "px " + font.family;
-        var fullW5 = ctx.measureText(inf2.text).width;
-        var scanLeft = Math.max(0, Math.floor(ecx - fullW5 / 2) - 2);
-        var scanRight = Math.min(cw, Math.ceil(ecx + fullW5 / 2) + 2);
-        var scanTop = Math.max(0, Math.floor(inf2.y - inf2.fontSize * 0.35));
-        var scanBot = Math.min(ch, Math.ceil(inf2.y + inf2.fontSize * 0.35));
-        var stripW = scanRight - scanLeft;
-        var stripH = scanBot - scanTop;
-        if (stripW <= 0 || stripH <= 0) continue;
-
+      // 5. Draw letter-to-letter connectors where pixel gaps exist between letters
+      var measuredW = ctx.measureText(line).width;
+      var scanLeft = Math.max(0, Math.floor(ecx - measuredW / 2) - 2);
+      var scanRight = Math.min(cw, Math.ceil(ecx + measuredW / 2) + 2);
+      var scanTop = Math.max(0, Math.floor(ecy - fontSize * 0.45));
+      var scanBot = Math.min(ch, Math.ceil(ecy + fontSize * 0.45));
+      var stripW = scanRight - scanLeft;
+      var stripH = scanBot - scanTop;
+      if (stripW > 0 && stripH > 0) {
         var stripData = ctx.getImageData(scanLeft, scanTop, stripW, stripH);
-        // For each column, check if ANY pixel is black
         var colHasBlack = new Array(stripW);
         for (var cx2 = 0; cx2 < stripW; cx2++) {
           colHasBlack[cx2] = false;
@@ -1068,51 +980,46 @@ export default function TextCircleTool() {
             }
           }
         }
-
         // Find gaps: runs of all-white columns between black columns
-        var inGap = false, gapStart5 = 0;
-        var connBarH = inf2.fontSize * 0.12;
+        var inGap = false, gapStart = 0;
+        var connBarH = Math.max(fontSize * 0.12, 3);
         var foundFirstBlack = false;
+        ctx.fillStyle = "#000000";
         for (var cx3 = 0; cx3 < stripW; cx3++) {
           if (colHasBlack[cx3]) {
             foundFirstBlack = true;
             if (inGap) {
-              // Gap ends — fill it
-              ctx.fillRect(scanLeft + gapStart5 - 1, inf2.y - connBarH / 2,
-                           cx3 - gapStart5 + 2, connBarH);
+              ctx.fillRect(scanLeft + gapStart - 1, ecy - connBarH / 2,
+                           cx3 - gapStart + 2, connBarH);
               inGap = false;
             }
           } else if (foundFirstBlack && !inGap) {
             inGap = true;
-            gapStart5 = cx3;
+            gapStart = cx3;
           }
         }
       }
 
-      // 6. Draw connector bars on canvas (for preview image only)
+      // 6. Draw connector bars from text to ring
       if (enableConnectors) {
         var connH = connectorThickness * 3;
         ctx.fillStyle = "#000000";
-        for (var li4 = 0; li4 < lineInfos.length; li4++) {
-          var inf = lineInfos[li4];
-          ctx.font = fontWeight + " " + inf.fontSize + "px " + font.family;
-          var measuredW = ctx.measureText(inf.text).width;
-          var dy3 = inf.y - ecy;
-          var ratioSq2 = (dy3 * dy3) / (iry * iry);
-          if (ratioSq2 >= 1) continue;
-          var ringInnerHalfW = irx * Math.sqrt(1 - ratioSq2);
+        var dy = ecy - ecy; // 0 for single centered line
+        var ratioSq = (dy * dy) / (iry * iry);
+        if (ratioSq < 1) {
+          var ringInnerHalfW = irx * Math.sqrt(1 - ratioSq);
           var textHalfW = measuredW / 2;
 
           var leftRingX = ecx - ringInnerHalfW;
           var leftTextX = ecx - textHalfW;
           if (leftTextX > leftRingX + 2) {
-            ctx.fillRect(leftRingX - borderPx * 0.5, inf.y - connH / 2,
+            ctx.fillRect(leftRingX - borderPx * 0.5, ecy - connH / 2,
               leftTextX - leftRingX + borderPx * 0.5 + 2, connH);
           }
           var rightRingX = ecx + ringInnerHalfW;
           var rightTextX = ecx + textHalfW;
           if (rightTextX < rightRingX - 2) {
-            ctx.fillRect(rightTextX - 2, inf.y - connH / 2,
+            ctx.fillRect(rightTextX - 2, ecy - connH / 2,
               rightRingX - rightTextX + borderPx * 0.5 + 2, connH);
           }
         }
@@ -1120,101 +1027,15 @@ export default function TextCircleTool() {
 
       setPreviewDataUrl(cv.toDataURL());
 
-      // 7. Extract contours in separate passes (ring and text independently)
-      // Pass A: Ring only
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, cw, ch);
-      ctx.beginPath();
-      ctx.ellipse(ecx, ecy, erx, ery, 0, 0, 2 * Math.PI);
-      ctx.fillStyle = "#000000";
-      ctx.fill();
-      ctx.beginPath();
-      ctx.ellipse(ecx, ecy, irx, iry, 0, 0, 2 * Math.PI);
-      ctx.fillStyle = "#ffffff";
-      ctx.fill();
-
-      var ringContours = extractContoursFromCanvas(ctx, cw, ch, smoothIter, sharpAngle);
-
-      // Pass B: Text only (with letter-to-letter connectors)
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, cw, ch);
-      ctx.fillStyle = "#000000";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      for (var li6 = 0; li6 < lineInfos.length; li6++) {
-        var inf3 = lineInfos[li6];
-        ctx.font = fontWeight + " " + inf3.fontSize + "px " + font.family;
-        ctx.fillText(inf3.text, ecx, inf3.y);
-      }
-      // Re-apply pixel-gap letter connectors on text-only canvas
-      ctx.fillStyle = "#000000";
-      for (var li7 = 0; li7 < lineInfos.length; li7++) {
-        var inf4 = lineInfos[li7];
-        ctx.font = fontWeight + " " + inf4.fontSize + "px " + font.family;
-        var fullW7 = ctx.measureText(inf4.text).width;
-        var sL = Math.max(0, Math.floor(ecx - fullW7 / 2) - 2);
-        var sR = Math.min(cw, Math.ceil(ecx + fullW7 / 2) + 2);
-        var sT = Math.max(0, Math.floor(inf4.y - inf4.fontSize * 0.35));
-        var sB = Math.min(ch, Math.ceil(inf4.y + inf4.fontSize * 0.35));
-        var sW = sR - sL, sH2 = sB - sT;
-        if (sW <= 0 || sH2 <= 0) continue;
-        var sd2 = ctx.getImageData(sL, sT, sW, sH2);
-        var colBlack = new Array(sW);
-        for (var c2 = 0; c2 < sW; c2++) {
-          colBlack[c2] = false;
-          for (var r2 = 0; r2 < sH2; r2++) {
-            if (sd2.data[(r2 * sW + c2) * 4] < 128) { colBlack[c2] = true; break; }
-          }
-        }
-        var inG = false, gS = 0, fB = false;
-        var cBH = inf4.fontSize * 0.12;
-        for (var c3 = 0; c3 < sW; c3++) {
-          if (colBlack[c3]) {
-            fB = true;
-            if (inG) {
-              ctx.fillRect(sL + gS - 1, inf4.y - cBH / 2, c3 - gS + 2, cBH);
-              inG = false;
-            }
-          } else if (fB && !inG) { inG = true; gS = c3; }
-        }
-      }
-
-      var textContours = extractContoursFromCanvas(ctx, cw, ch, smoothIter, sharpAngle);
-
-      // Combine ring + text contours
-      var allContours = ringContours.concat(textContours);
+      // 7. Extract contours from the single combined canvas — everything is already drawn
+      var allContours = extractContoursFromCanvas(ctx, cw, ch, smoothIter, sharpAngle);
       setContours(allContours);
 
-      // Compute bridge info for 3D connector geometry
-      var bridgeInfos = [];
-      if (enableConnectors) {
-        var connH2 = connectorThickness * 3;
-        for (var li8 = 0; li8 < lineInfos.length; li8++) {
-          var inf5 = lineInfos[li8];
-          ctx.font = fontWeight + " " + inf5.fontSize + "px " + font.family;
-          var mW = ctx.measureText(inf5.text).width;
-          var dy4 = inf5.y - ecy;
-          var rSq = (dy4 * dy4) / (iry * iry);
-          if (rSq >= 1) continue;
-          var riHW = irx * Math.sqrt(1 - rSq);
-          var tHW = mW / 2;
-          var lR = ecx - riHW, lT = ecx - tHW;
-          var rR2 = ecx + riHW, rT = ecx + tHW;
-          if (lT > lR + 2) {
-            bridgeInfos.push({ x1: lR - borderPx * 0.3, x2: lT + 1, y: inf5.y, halfH: connH2 / 2 });
-          }
-          if (rT < rR2 - 2) {
-            bridgeInfos.push({ x1: rT - 1, x2: rR2 + borderPx * 0.3, y: inf5.y, halfH: connH2 / 2 });
-          }
-        }
-      }
-      setConnectorBridges(bridgeInfos);
-
       setDownloadUrl(null);
-      var cleanName = lines.join("_").replace(/[^a-zA-Z0-9äöüÄÖÜß_]/g, "").substring(0, 30);
+      var cleanName = line.replace(/[^a-zA-Z0-9äöüÄÖÜß_]/g, "").substring(0, 30);
       setFileName(cleanName || "text_circle");
     });
-  }, [text, fontIdx, bold, padding, ellipseRatio, borderThickness, smoothIter, sharpAngle,
+  }, [text, fontIdx, bold, ellipseRatio, borderThickness, smoothIter, sharpAngle,
       textOverlap, enableConnectors, connectorThickness, textYOffset]);
 
   _e(function() {
@@ -1231,12 +1052,12 @@ export default function TextCircleTool() {
         }
       }
       var ew = maxX - minX || 100;
-      var tris = buildTriangles(contours, mode, targetWidth, ew, wallThickness, extrudeHeight, bevelSteps, bevelBottom, connectorBridges);
+      var tris = buildTriangles(contours, targetWidth, ew, extrudeHeight, bevelSteps, bevelBottom);
       setPreviewTris(tris);
     } else {
       setPreviewTris([]);
     }
-  }, [contours, mode, targetWidth, wallThickness, extrudeHeight, bevelSteps, bevelBottom, connectorBridges]);
+  }, [contours, targetWidth, extrudeHeight, bevelSteps, bevelBottom]);
 
   var generateSTL = function() {
     if (contours.length === 0) return;
@@ -1251,7 +1072,7 @@ export default function TextCircleTool() {
         }
       }
       var ew = maxX - minX || 100;
-      var tris = buildTriangles(contours, mode, targetWidth, ew, wallThickness, extrudeHeight, bevelSteps, bevelBottom, connectorBridges);
+      var tris = buildTriangles(contours, targetWidth, ew, extrudeHeight, bevelSteps, bevelBottom);
       var buf = buildSTLBuffer(tris);
       var b64 = arrayBufferToBase64(buf);
       var dataUri = "data:application/octet-stream;base64," + b64;
@@ -1282,16 +1103,16 @@ export default function TextCircleTool() {
   return (
     <div style={{ width: "100%", maxWidth: 540, display: "flex", flexDirection: "column", gap: 14 }}>
 
-      <Section title="Text eingeben" desc="Gib den Text ein (Enter fuer neue Zeile, bis zu 3 Zeilen).">
-        <textarea
+      <Section title="Text eingeben" desc="Gib deinen Text ein.">
+        <input
+          type="text"
           value={text}
           onChange={function(e) { setText(e.target.value); }}
-          rows={3}
-          placeholder={"Zeile 1\nZeile 2 (optional)\nZeile 3 (optional)"}
+          placeholder="Willkommen"
           style={{
             width: "100%", padding: "12px 16px", fontSize: 18, fontFamily: "inherit",
             border: "2px solid #d4bfa6", borderRadius: 12, background: "#fff",
-            color: "#3d2e1f", outline: "none", resize: "vertical", lineHeight: 1.5
+            color: "#3d2e1f", outline: "none"
           }}
         />
       </Section>
@@ -1363,10 +1184,6 @@ export default function TextCircleTool() {
           desc="Wie weit Text ueber den Innenrand hinausreicht (>1 = Text kreuzt den Ring)"
           value={textOverlap} min={0.7} max={1.5} step={0.05}
           onChange={setTextOverlap} display={textOverlap.toFixed(2) + "x"} />
-        <SliderRow label="Zeilen-Abstand"
-          desc="Abstand zwischen den Textzeilen"
-          value={padding} min={0} max={60} step={1}
-          onChange={setPadding} display={padding + " px"} />
         <SliderRow label="Text vertikal verschieben"
           desc="Text nach oben oder unten verschieben"
           value={textYOffset} min={-50} max={50} step={1}
@@ -1431,12 +1248,6 @@ export default function TextCircleTool() {
           desc="So dick/hoch wird das Objekt"
           value={extrudeHeight} min={1} max={20} step={0.5}
           onChange={setExtrudeHeight} display={extrudeHeight + " mm"} />
-        {mode === "frame" && (
-          <SliderRow label="Wandstaerke"
-            desc="Breite der Rahmenwand"
-            value={wallThickness} min={0.5} max={8} step={0.25}
-            onChange={setWallThickness} display={wallThickness + " mm"} />
-        )}
         <SliderRow label="Kanten-Rundung"
           desc="Wie stark die obere Kante abgerundet wird"
           value={bevelSteps} min={0} max={8} step={1}
@@ -1451,14 +1262,6 @@ export default function TextCircleTool() {
             </PillButton>
           </div>
         )}
-        <div style={{ display: "flex", gap: 10, marginTop: 6, flexWrap: "wrap" }}>
-          <PillButton active={mode === "frame"} onClick={function() { setMode("frame"); }}>
-            Rahmen (nur Umriss)
-          </PillButton>
-          <PillButton active={mode === "solid"} onClick={function() { setMode("solid"); }}>
-            Massiv (ausgefuellt)
-          </PillButton>
-        </div>
       </Section>
 
       {previewTris.length > 0 && (

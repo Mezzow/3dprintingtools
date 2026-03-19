@@ -660,7 +660,51 @@ function arrayBufferToBase64(buffer) {
   return btoa(binary);
 }
 
-function buildTriangles(contours, mode, targetWidth, imgW, wallThickness, extrudeHeight, bevelSteps, bevelBottom) {
+function extractContoursFromCanvas(ctx, cw, ch, smoothIter, sharpAngle) {
+  var data = ctx.getImageData(0, 0, cw, ch);
+  var binary = new Uint8Array(cw * ch);
+  for (var i = 0; i < cw * ch; i++) {
+    var r = data.data[i*4], g = data.data[i*4+1], b2 = data.data[i*4+2];
+    var gray = 0.299*r + 0.587*g + 0.114*b2;
+    binary[i] = gray < 128 ? 1 : 0;
+  }
+  var segments = marchingSquares(binary, cw, ch);
+  var chains = chainSegments(segments);
+  chains = chains.map(function(c) {
+    var d = Math.hypot(c[0][0]-c[c.length-1][0], c[0][1]-c[c.length-1][1]);
+    return d < 2 ? c.slice(0,-1) : c;
+  }).filter(function(c) { return c.length >= 6; });
+  var processed = chains.map(function(c) { return processContour(c, smoothIter, cw, sharpAngle); });
+  return processed.filter(function(c) { return c.length >= 6; });
+}
+
+function generateBridgeBox(x1, x2, y, halfH, height, scale, imgW) {
+  // Generate a rectangular prism (box) as triangles for a connector bridge
+  var s = scale;
+  var ax = x1 * s, bx = x2 * s;
+  var ay = (y - halfH) * s, by = (y + halfH) * s;
+  var tris = [];
+  // 6 faces, 2 triangles each = 12 triangles
+  var p = [
+    [ax, ay, 0], [bx, ay, 0], [bx, by, 0], [ax, by, 0],       // bottom (z=0)
+    [ax, ay, height], [bx, ay, height], [bx, by, height], [ax, by, height]  // top (z=height)
+  ];
+  // Bottom face
+  tris.push([p[0], p[2], p[1]]); tris.push([p[0], p[3], p[2]]);
+  // Top face
+  tris.push([p[4], p[5], p[6]]); tris.push([p[4], p[6], p[7]]);
+  // Front face (y=ay)
+  tris.push([p[0], p[1], p[5]]); tris.push([p[0], p[5], p[4]]);
+  // Back face (y=by)
+  tris.push([p[2], p[3], p[7]]); tris.push([p[2], p[7], p[6]]);
+  // Left face (x=ax)
+  tris.push([p[0], p[4], p[7]]); tris.push([p[0], p[7], p[3]]);
+  // Right face (x=bx)
+  tris.push([p[1], p[2], p[6]]); tris.push([p[1], p[6], p[5]]);
+  return tris;
+}
+
+function buildTriangles(contours, mode, targetWidth, imgW, wallThickness, extrudeHeight, bevelSteps, bevelBottom, bridges) {
   var scale = targetWidth / (imgW || 100);
   var allTris = [];
 
@@ -689,6 +733,16 @@ function buildTriangles(contours, mode, targetWidth, imgW, wallThickness, extrud
           generateSolidMesh(holeContours[hi], extrudeHeight, scale, bevelSteps, bevelBottom, null, true)
         );
       }
+    }
+  }
+
+  // Add connector bridge geometry (text-to-ring bridges)
+  if (bridges && bridges.length > 0) {
+    for (var bi = 0; bi < bridges.length; bi++) {
+      var br = bridges[bi];
+      allTris = allTris.concat(
+        generateBridgeBox(br.x1, br.x2, br.y, br.halfH, extrudeHeight, scale, imgW)
+      );
     }
   }
 
@@ -876,6 +930,7 @@ export default function TextCircleTool() {
   var sw = _s(true), enableConnectors = sw[0], setEnableConnectors = sw[1];
   var sx = _s(2.0), connectorThickness = sx[0], setConnectorThickness = sx[1];
   var sy = _s(0), textYOffset = sy[0], setTextYOffset = sy[1];
+  var sz = _s([]), connectorBridges = sz[0], setConnectorBridges = sz[1];
 
   _e(function() {
     loadFont(FONTS[fontIdx]);
@@ -987,23 +1042,54 @@ export default function TextCircleTool() {
         ctx.fillText(info.text, ecx, info.y);
       }
 
-      // 5b. Draw letter-to-letter connectors within each line
+      // 5b. Draw letter-to-letter connectors only where actual pixel gaps exist
       ctx.fillStyle = "#000000";
       for (var li5 = 0; li5 < lineInfos.length; li5++) {
         var inf2 = lineInfos[li5];
         ctx.font = fontWeight + " " + inf2.fontSize + "px " + font.family;
-        var fullW = ctx.measureText(inf2.text).width;
-        var startX = ecx - fullW / 2;
+        var fullW5 = ctx.measureText(inf2.text).width;
+        var scanLeft = Math.max(0, Math.floor(ecx - fullW5 / 2) - 2);
+        var scanRight = Math.min(cw, Math.ceil(ecx + fullW5 / 2) + 2);
+        var scanTop = Math.max(0, Math.floor(inf2.y - inf2.fontSize * 0.35));
+        var scanBot = Math.min(ch, Math.ceil(inf2.y + inf2.fontSize * 0.35));
+        var stripW = scanRight - scanLeft;
+        var stripH = scanBot - scanTop;
+        if (stripW <= 0 || stripH <= 0) continue;
+
+        var stripData = ctx.getImageData(scanLeft, scanTop, stripW, stripH);
+        // For each column, check if ANY pixel is black
+        var colHasBlack = new Array(stripW);
+        for (var cx2 = 0; cx2 < stripW; cx2++) {
+          colHasBlack[cx2] = false;
+          for (var cy2 = 0; cy2 < stripH; cy2++) {
+            if (stripData.data[(cy2 * stripW + cx2) * 4] < 128) {
+              colHasBlack[cx2] = true;
+              break;
+            }
+          }
+        }
+
+        // Find gaps: runs of all-white columns between black columns
+        var inGap = false, gapStart5 = 0;
         var connBarH = inf2.fontSize * 0.12;
-        var connBarW = Math.max(3, inf2.fontSize * 0.06);
-        for (var k = 0; k < inf2.text.length - 1; k++) {
-          if (inf2.text[k] === ' ' || inf2.text[k + 1] === ' ') continue;
-          var boundaryX = startX + ctx.measureText(inf2.text.substring(0, k + 1)).width;
-          ctx.fillRect(boundaryX - connBarW / 2, inf2.y - connBarH / 2, connBarW, connBarH);
+        var foundFirstBlack = false;
+        for (var cx3 = 0; cx3 < stripW; cx3++) {
+          if (colHasBlack[cx3]) {
+            foundFirstBlack = true;
+            if (inGap) {
+              // Gap ends — fill it
+              ctx.fillRect(scanLeft + gapStart5 - 1, inf2.y - connBarH / 2,
+                           cx3 - gapStart5 + 2, connBarH);
+              inGap = false;
+            }
+          } else if (foundFirstBlack && !inGap) {
+            inGap = true;
+            gapStart5 = cx3;
+          }
         }
       }
 
-      // 6. Draw connector bars (bridges from text to ring)
+      // 6. Draw connector bars on canvas (for preview image only)
       if (enableConnectors) {
         var connH = connectorThickness * 3;
         ctx.fillStyle = "#000000";
@@ -1017,15 +1103,12 @@ export default function TextCircleTool() {
           var ringInnerHalfW = irx * Math.sqrt(1 - ratioSq2);
           var textHalfW = measuredW / 2;
 
-          // Left connector: from ring inner edge to text left edge
           var leftRingX = ecx - ringInnerHalfW;
           var leftTextX = ecx - textHalfW;
           if (leftTextX > leftRingX + 2) {
             ctx.fillRect(leftRingX - borderPx * 0.5, inf.y - connH / 2,
               leftTextX - leftRingX + borderPx * 0.5 + 2, connH);
           }
-
-          // Right connector: from text right edge to ring inner edge
           var rightRingX = ecx + ringInnerHalfW;
           var rightTextX = ecx + textHalfW;
           if (rightTextX < rightRingX - 2) {
@@ -1037,26 +1120,96 @@ export default function TextCircleTool() {
 
       setPreviewDataUrl(cv.toDataURL());
 
-      // 7. Extract contours via marching squares
-      var data = ctx.getImageData(0, 0, cw, ch);
-      var binary = new Uint8Array(cw * ch);
-      for (var i = 0; i < cw * ch; i++) {
-        var r = data.data[i*4], g = data.data[i*4+1], b2 = data.data[i*4+2];
-        var gray = 0.299*r + 0.587*g + 0.114*b2;
-        binary[i] = gray < 128 ? 1 : 0;
+      // 7. Extract contours in separate passes (ring and text independently)
+      // Pass A: Ring only
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, cw, ch);
+      ctx.beginPath();
+      ctx.ellipse(ecx, ecy, erx, ery, 0, 0, 2 * Math.PI);
+      ctx.fillStyle = "#000000";
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(ecx, ecy, irx, iry, 0, 0, 2 * Math.PI);
+      ctx.fillStyle = "#ffffff";
+      ctx.fill();
+
+      var ringContours = extractContoursFromCanvas(ctx, cw, ch, smoothIter, sharpAngle);
+
+      // Pass B: Text only (with letter-to-letter connectors)
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, cw, ch);
+      ctx.fillStyle = "#000000";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      for (var li6 = 0; li6 < lineInfos.length; li6++) {
+        var inf3 = lineInfos[li6];
+        ctx.font = fontWeight + " " + inf3.fontSize + "px " + font.family;
+        ctx.fillText(inf3.text, ecx, inf3.y);
+      }
+      // Re-apply pixel-gap letter connectors on text-only canvas
+      ctx.fillStyle = "#000000";
+      for (var li7 = 0; li7 < lineInfos.length; li7++) {
+        var inf4 = lineInfos[li7];
+        ctx.font = fontWeight + " " + inf4.fontSize + "px " + font.family;
+        var fullW7 = ctx.measureText(inf4.text).width;
+        var sL = Math.max(0, Math.floor(ecx - fullW7 / 2) - 2);
+        var sR = Math.min(cw, Math.ceil(ecx + fullW7 / 2) + 2);
+        var sT = Math.max(0, Math.floor(inf4.y - inf4.fontSize * 0.35));
+        var sB = Math.min(ch, Math.ceil(inf4.y + inf4.fontSize * 0.35));
+        var sW = sR - sL, sH2 = sB - sT;
+        if (sW <= 0 || sH2 <= 0) continue;
+        var sd2 = ctx.getImageData(sL, sT, sW, sH2);
+        var colBlack = new Array(sW);
+        for (var c2 = 0; c2 < sW; c2++) {
+          colBlack[c2] = false;
+          for (var r2 = 0; r2 < sH2; r2++) {
+            if (sd2.data[(r2 * sW + c2) * 4] < 128) { colBlack[c2] = true; break; }
+          }
+        }
+        var inG = false, gS = 0, fB = false;
+        var cBH = inf4.fontSize * 0.12;
+        for (var c3 = 0; c3 < sW; c3++) {
+          if (colBlack[c3]) {
+            fB = true;
+            if (inG) {
+              ctx.fillRect(sL + gS - 1, inf4.y - cBH / 2, c3 - gS + 2, cBH);
+              inG = false;
+            }
+          } else if (fB && !inG) { inG = true; gS = c3; }
+        }
       }
 
-      var segments = marchingSquares(binary, cw, ch);
-      var chains = chainSegments(segments);
-      chains = chains.map(function(c) {
-        var d = Math.hypot(c[0][0]-c[c.length-1][0], c[0][1]-c[c.length-1][1]);
-        return d < 2 ? c.slice(0,-1) : c;
-      }).filter(function(c) { return c.length >= 6; });
+      var textContours = extractContoursFromCanvas(ctx, cw, ch, smoothIter, sharpAngle);
 
-      var processed = chains.map(function(c) { return processContour(c, smoothIter, cw, sharpAngle); });
-      processed = processed.filter(function(c) { return c.length >= 6; });
+      // Combine ring + text contours
+      var allContours = ringContours.concat(textContours);
+      setContours(allContours);
 
-      setContours(processed);
+      // Compute bridge info for 3D connector geometry
+      var bridgeInfos = [];
+      if (enableConnectors) {
+        var connH2 = connectorThickness * 3;
+        for (var li8 = 0; li8 < lineInfos.length; li8++) {
+          var inf5 = lineInfos[li8];
+          ctx.font = fontWeight + " " + inf5.fontSize + "px " + font.family;
+          var mW = ctx.measureText(inf5.text).width;
+          var dy4 = inf5.y - ecy;
+          var rSq = (dy4 * dy4) / (iry * iry);
+          if (rSq >= 1) continue;
+          var riHW = irx * Math.sqrt(1 - rSq);
+          var tHW = mW / 2;
+          var lR = ecx - riHW, lT = ecx - tHW;
+          var rR2 = ecx + riHW, rT = ecx + tHW;
+          if (lT > lR + 2) {
+            bridgeInfos.push({ x1: lR - borderPx * 0.3, x2: lT + 1, y: inf5.y, halfH: connH2 / 2 });
+          }
+          if (rT < rR2 - 2) {
+            bridgeInfos.push({ x1: rT - 1, x2: rR2 + borderPx * 0.3, y: inf5.y, halfH: connH2 / 2 });
+          }
+        }
+      }
+      setConnectorBridges(bridgeInfos);
+
       setDownloadUrl(null);
       var cleanName = lines.join("_").replace(/[^a-zA-Z0-9äöüÄÖÜß_]/g, "").substring(0, 30);
       setFileName(cleanName || "text_circle");
@@ -1078,12 +1231,12 @@ export default function TextCircleTool() {
         }
       }
       var ew = maxX - minX || 100;
-      var tris = buildTriangles(contours, mode, targetWidth, ew, wallThickness, extrudeHeight, bevelSteps, bevelBottom);
+      var tris = buildTriangles(contours, mode, targetWidth, ew, wallThickness, extrudeHeight, bevelSteps, bevelBottom, connectorBridges);
       setPreviewTris(tris);
     } else {
       setPreviewTris([]);
     }
-  }, [contours, mode, targetWidth, wallThickness, extrudeHeight, bevelSteps, bevelBottom]);
+  }, [contours, mode, targetWidth, wallThickness, extrudeHeight, bevelSteps, bevelBottom, connectorBridges]);
 
   var generateSTL = function() {
     if (contours.length === 0) return;
@@ -1098,7 +1251,7 @@ export default function TextCircleTool() {
         }
       }
       var ew = maxX - minX || 100;
-      var tris = buildTriangles(contours, mode, targetWidth, ew, wallThickness, extrudeHeight, bevelSteps, bevelBottom);
+      var tris = buildTriangles(contours, mode, targetWidth, ew, wallThickness, extrudeHeight, bevelSteps, bevelBottom, connectorBridges);
       var buf = buildSTLBuffer(tris);
       var b64 = arrayBufferToBase64(buf);
       var dataUri = "data:application/octet-stream;base64," + b64;

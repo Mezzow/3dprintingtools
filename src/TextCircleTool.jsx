@@ -1026,90 +1026,73 @@ export default function TextCircleTool() {
       // === Draw combined shape in black for contour extraction ===
       drawBase("#000000", "#000000");
 
-      // Connectors: scan the rendered image for pixel gaps and bridge them.
-      // Strategy: use a thin horizontal band at bridge height to detect gaps
-      // exactly where the bridge will be placed, with a moderate threshold
-      // that ignores faint anti-aliasing. Max gap width prevents bridging
-      // internal letter features (like inside "o" or "e").
+      // Connectors: hybrid approach
+      // 1. Character boundaries decide WHERE to place bridges (never inside letters)
+      // 2. Pixel scan at bridge height decides HOW FAR to extend (finds actual ink)
+      ctx.font = fontWeight + " " + fontSize + "px " + font.family;
       var bridgeH = Math.max(4, Math.round(fontSize * 0.06));
-      var maxGapW = Math.round(fontSize * 0.25); // don't bridge gaps wider than this
+      var bY = Math.round(ecy - bridgeH / 2);
+      var textMW = ctx.measureText(line).width;
+      var textStartX = ecx - textMW / 2;
+      var inkOverlap = Math.max(3, Math.round(fontSize * 0.03));
 
-      // Scan region: outer ring edge to outer ring edge
-      var fullLeft = Math.max(0, Math.floor(ecx - erx - 5));
-      var fullRight = Math.min(cw, Math.ceil(ecx + erx + 5));
-      var fullW = fullRight - fullLeft;
-
-      // Thin band at vertical center — exactly where the bridge sits
-      var scanH = Math.max(6, bridgeH + 4);
-      var scanTop = Math.max(0, Math.round(ecy - scanH / 2));
-      var scanActH = Math.min(ch - scanTop, scanH);
-
-      // Also a tall band for a "solid body" map — used to extend bridges
-      var tallH = Math.max(10, Math.round(fontSize * 0.9));
-      var tallTop = Math.max(0, Math.round(ecy - tallH / 2));
-      var tallActH = Math.min(ch - tallTop, tallH);
+      // Scan a few rows at bridge height for ink detection
+      var scanRows = Math.max(2, Math.round(bridgeH * 0.6));
+      var scanTop = Math.round(ecy - scanRows / 2);
+      var scanData = ctx.getImageData(0, scanTop, cw, scanRows);
+      var hasInkAt = function(x) {
+        if (x < 0 || x >= cw) return false;
+        for (var r = 0; r < scanRows; r++) {
+          if (scanData.data[(r * cw + x) * 4] < 128) return true;
+        }
+        return false;
+      };
 
       var gapBridges = [];
-      if (fullW > 0 && scanActH > 0 && tallActH > 0) {
-        // Thin band: detect gaps at bridge height
-        var sd = ctx.getImageData(fullLeft, scanTop, fullW, scanActH);
-        var colInk = new Uint8Array(fullW); // has visible ink at bridge height
-        for (var c = 0; c < fullW; c++) {
-          for (var r = 0; r < scanActH; r++) {
-            if (sd.data[(r * fullW + c) * 4] < 128) {
-              colInk[c] = 1;
-              break;
-            }
-          }
-        }
+      ctx.fillStyle = "#000000";
 
-        // Tall band: find solid letter body for bridge extension
-        var td = ctx.getImageData(fullLeft, tallTop, fullW, tallActH);
-        var colSolid = new Uint8Array(fullW);
-        for (var c = 0; c < fullW; c++) {
-          for (var r = 0; r < tallActH; r++) {
-            if (td.data[(r * fullW + c) * 4] < 32) {
-              colSolid[c] = 1;
-              break;
-            }
-          }
+      // Bridge at each character boundary
+      for (var ci = 1; ci < line.length; ci++) {
+        var prefW = ctx.measureText(line.substring(0, ci)).width;
+        var bndX = Math.round(textStartX + prefW);
+        // Walk left/right from boundary to find ink at bridge height
+        var leftInk = bndX;
+        while (leftInk > 0 && !hasInkAt(leftInk)) leftInk--;
+        var rightInk = bndX;
+        while (rightInk < cw - 1 && !hasInkAt(rightInk)) rightInk++;
+        var bx = leftInk - inkOverlap;
+        var bx2 = rightInk + inkOverlap;
+        var bwidth = bx2 - bx;
+        if (bwidth > 0) {
+          ctx.fillRect(bx, bY, bwidth, bridgeH);
+          gapBridges.push([bx, bY, bwidth, bridgeH]);
         }
+      }
 
-        // Find gaps: runs of non-ink columns in the thin band
-        ctx.fillStyle = "#000000";
-        var inGap = false;
-        var gapStart = 0;
-        for (var c = 0; c <= fullW; c++) {
-          var ink = c < fullW ? colInk[c] : 1;
-          if (!ink && !inGap) {
-            inGap = true;
-            gapStart = c;
-          } else if (ink && inGap) {
-            inGap = false;
-            var gapW = c - gapStart;
-            // Skip gaps too wide (internal letter features) or at edges
-            if (gapW > maxGapW) continue;
-            // Must have solid material within reach on both sides
-            var solidL = -1, solidR = -1;
-            for (var sl = gapStart - 1; sl >= 0 && sl >= gapStart - 30; sl--) {
-              if (colSolid[sl]) { solidL = sl; break; }
-            }
-            for (var sr = c; sr < fullW && sr <= c + 30; sr++) {
-              if (colSolid[sr]) { solidR = sr; break; }
-            }
-            if (solidL >= 0 && solidR >= 0) {
-              // Bridge from a few px into left solid body to a few px into right
-              var extra = Math.max(2, Math.round(fontSize * 0.02));
-              var bL = Math.max(0, solidL - extra);
-              var bR = Math.min(fullW - 1, solidR + extra);
-              var gX = fullLeft + bL;
-              var gW = bR - bL + 1;
-              var gY = Math.round(ecy - bridgeH / 2);
-              ctx.fillRect(gX, gY, gW, bridgeH);
-              gapBridges.push([gX, gY, gW, bridgeH]);
-            }
-          }
-        }
+      // Text-to-ring bridges
+      var ringInnerLeft = Math.round(ecx - irx);
+      var ringInnerRight = Math.round(ecx + irx);
+      // Left side
+      var leftTextInk = Math.round(textStartX);
+      while (leftTextInk < ecx && !hasInkAt(leftTextInk)) leftTextInk++;
+      var leftRingInk = ringInnerLeft;
+      while (leftRingInk > 0 && !hasInkAt(leftRingInk)) leftRingInk--;
+      if (leftTextInk > leftRingInk + 3) {
+        var lbx = leftRingInk - inkOverlap;
+        var lbw = leftTextInk + inkOverlap - lbx;
+        ctx.fillRect(lbx, bY, lbw, bridgeH);
+        gapBridges.push([lbx, bY, lbw, bridgeH]);
+      }
+      // Right side
+      var rightTextInk = Math.round(textStartX + textMW);
+      while (rightTextInk > ecx && !hasInkAt(rightTextInk)) rightTextInk--;
+      var rightRingInk = ringInnerRight;
+      while (rightRingInk < cw - 1 && !hasInkAt(rightRingInk)) rightRingInk++;
+      if (rightTextInk < rightRingInk - 3) {
+        var rbx = rightTextInk - inkOverlap;
+        var rbw = rightRingInk + inkOverlap - rbx;
+        ctx.fillRect(rbx, bY, rbw, bridgeH);
+        gapBridges.push([rbx, bY, rbw, bridgeH]);
       }
 
       // Single-pass contour extraction from the combined shape

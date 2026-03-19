@@ -1124,8 +1124,8 @@ export default function TextCircleTool() {
 
       // === PREVIEW IMAGE: redraw with visual distinction ===
       drawBase("#555555", "#000000");
-      // Show connectors subtly in preview
-      ctx.fillStyle = "#aaaaaa";
+      // Show connectors in preview matching output
+      ctx.fillStyle = "#000000";
       for (var bi = 0; bi < gapBridges.length; bi++) {
         var b = gapBridges[bi];
         ctx.fillRect(b[0], b[1], b[2], b[3]);

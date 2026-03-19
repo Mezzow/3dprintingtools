@@ -1029,6 +1029,7 @@ export default function TextCircleTool() {
       // Connectors: hybrid approach
       // 1. Character boundaries decide WHERE to place bridges (never inside letters)
       // 2. Pixel scan at bridge height decides HOW FAR to extend (finds actual ink)
+      // 3. Skip bridges where letters already connect (e.g. cursive fonts)
       ctx.font = fontWeight + " " + fontSize + "px " + font.family;
       var bridgeH = Math.max(4, Math.round(fontSize * 0.06));
       var bY = Math.round(ecy - bridgeH / 2);
@@ -1036,7 +1037,7 @@ export default function TextCircleTool() {
       var textStartX = ecx - textMW / 2;
       var inkOverlap = Math.max(3, Math.round(fontSize * 0.03));
 
-      // Scan a few rows at bridge height for ink detection
+      // Narrow scan band for ink detection when extending bridges
       var scanRows = Math.max(2, Math.round(bridgeH * 0.6));
       var scanTop = Math.round(ecy - scanRows / 2);
       var scanData = ctx.getImageData(0, scanTop, cw, scanRows);
@@ -1048,6 +1049,19 @@ export default function TextCircleTool() {
         return false;
       };
 
+      // Wide scan band to detect existing connections (cursive fonts)
+      var connScanH = Math.max(6, Math.round(fontSize * 0.2));
+      var connScanTop = Math.max(0, Math.round(ecy - connScanH / 2));
+      var connScanActH = Math.min(ch - connScanTop, connScanH);
+      var connScanData = ctx.getImageData(0, connScanTop, cw, connScanActH);
+      var isConnectedAt = function(x) {
+        if (x < 0 || x >= cw) return false;
+        for (var r = 0; r < connScanActH; r++) {
+          if (connScanData.data[(r * cw + x) * 4] < 128) return true;
+        }
+        return false;
+      };
+
       var gapBridges = [];
       ctx.fillStyle = "#000000";
 
@@ -1055,6 +1069,8 @@ export default function TextCircleTool() {
       for (var ci = 1; ci < line.length; ci++) {
         var prefW = ctx.measureText(line.substring(0, ci)).width;
         var bndX = Math.round(textStartX + prefW);
+        // Skip if letters already connect at this boundary
+        if (isConnectedAt(bndX)) continue;
         // Walk left/right from boundary to find ink at bridge height
         var leftInk = bndX;
         while (leftInk > 0 && !hasInkAt(leftInk)) leftInk--;

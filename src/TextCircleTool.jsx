@@ -1026,11 +1026,12 @@ export default function TextCircleTool() {
       // === Draw combined shape in black for contour extraction ===
       drawBase("#000000", "#000000");
 
-      // Connectors: scan the rendered image for actual pixel gaps and bridge them
+      // Connectors: scan the rendered image for actual pixel gaps and bridge them.
+      // Two darkness levels: "solid" (< 64) to find definite letter body,
+      // "any" (< 200) to detect anti-aliased edges so we bridge past them.
       var bridgeH = Math.max(4, Math.round(fontSize * 0.06));
-      var bridgeOverlap = Math.max(3, Math.round(fontSize * 0.03));
 
-      // Scan region: outer ring edge to outer ring edge (full horizontal extent)
+      // Scan region: outer ring edge to outer ring edge
       var fullLeft = Math.max(0, Math.floor(ecx - erx - 5));
       var fullRight = Math.min(cw, Math.ceil(ecx + erx + 5));
       var fullW = fullRight - fullLeft;
@@ -1042,33 +1043,50 @@ export default function TextCircleTool() {
       var gapBridges = [];
       if (fullW > 0 && bandActH > 0) {
         var fd = ctx.getImageData(fullLeft, bandTop, fullW, bandActH);
-        // Build column darkness map: a column is "dark" if ANY pixel in the band is dark
-        var colDark = new Uint8Array(fullW);
+        // colAny: column has any ink at all (catches anti-aliased edges)
+        // colSolid: column has fully solid ink (definite letter body)
+        var colAny = new Uint8Array(fullW);
+        var colSolid = new Uint8Array(fullW);
         for (var c = 0; c < fullW; c++) {
           for (var r = 0; r < bandActH; r++) {
-            if (fd.data[(r * fullW + c) * 4] < 128) {
-              colDark[c] = 1;
-              break;
-            }
+            var v = fd.data[(r * fullW + c) * 4];
+            if (v < 200) colAny[c] = 1;
+            if (v < 64) { colSolid[c] = 1; break; }
           }
         }
 
-        // Find all pixel gaps: runs of consecutive non-dark columns
-        // that sit between two dark regions (i.e., between letters or between text and ring)
+        // Find gaps using the lenient "any" map — a gap is a run of columns
+        // with NO ink at all (not even anti-aliased). This ensures we detect
+        // even narrow gaps between letters.
         ctx.fillStyle = "#000000";
         var inGap = false;
         var gapStart = 0;
         for (var c = 0; c <= fullW; c++) {
-          var dark = c < fullW ? colDark[c] : 1; // treat past-end as dark to close final gap
-          if (!dark && !inGap) {
+          var hasInk = c < fullW ? colAny[c] : 1;
+          if (!hasInk && !inGap) {
             inGap = true;
             gapStart = c;
-          } else if (dark && inGap) {
+          } else if (hasInk && inGap) {
             inGap = false;
-            // Only bridge if there's dark material on both sides (not edge gaps)
-            if (gapStart > 0 && c < fullW) {
-              var gX = fullLeft + gapStart - bridgeOverlap;
-              var gW = (c - gapStart) + bridgeOverlap * 2;
+            // Only bridge if there's solid material on both sides
+            var hasLeft = false, hasRight = false;
+            for (var sl = gapStart - 1; sl >= 0 && sl >= gapStart - 20; sl--) {
+              if (colSolid[sl]) { hasLeft = true; break; }
+            }
+            for (var sr = c; sr < fullW && sr <= c + 20; sr++) {
+              if (colSolid[sr]) { hasRight = true; break; }
+            }
+            if (hasLeft && hasRight) {
+              // Extend bridge into solid letter body on each side
+              var bridgeLeft = gapStart;
+              while (bridgeLeft > 0 && !colSolid[bridgeLeft - 1]) bridgeLeft--;
+              bridgeLeft = Math.max(0, bridgeLeft - 2); // 2px extra past solid
+              var bridgeRight = c - 1;
+              while (bridgeRight < fullW - 1 && !colSolid[bridgeRight + 1]) bridgeRight++;
+              bridgeRight = Math.min(fullW - 1, bridgeRight + 2); // 2px extra past solid
+
+              var gX = fullLeft + bridgeLeft;
+              var gW = bridgeRight - bridgeLeft + 1;
               var gY = Math.round(ecy - bridgeH / 2);
               ctx.fillRect(gX, gY, gW, bridgeH);
               gapBridges.push([gX, gY, gW, bridgeH]);

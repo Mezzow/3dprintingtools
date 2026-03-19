@@ -1026,27 +1026,23 @@ export default function TextCircleTool() {
       // === Draw combined shape in black for contour extraction ===
       drawBase("#000000", "#000000");
 
-      // Smart connectors: only bridge actual gaps between letters and between text/ring
-      // Uses tall scan band (85% of font height) so internal letter features
-      // (like the gap inside W or M) are covered by pixels at other heights
-      var bridgeH = Math.max(4, Math.round(fontSize * 0.05));
-      ctx.font = fontWeight + " " + fontSize + "px " + font.family;
-      var textMW = ctx.measureText(line).width;
-      var textStartX = ecx - textMW / 2;
+      // Connectors: scan the rendered image for actual pixel gaps and bridge them
+      var bridgeH = Math.max(4, Math.round(fontSize * 0.06));
+      var bridgeOverlap = Math.max(3, Math.round(fontSize * 0.03));
 
-      // Full scan region: outer ring edge to outer ring edge
-      var fullLeft = Math.max(0, Math.floor(Math.min(ecx - erx, textStartX) - 5));
-      var fullRight = Math.min(cw, Math.ceil(Math.max(ecx + erx, textStartX + textMW) + 5));
+      // Scan region: outer ring edge to outer ring edge (full horizontal extent)
+      var fullLeft = Math.max(0, Math.floor(ecx - erx - 5));
+      var fullRight = Math.min(cw, Math.ceil(ecx + erx + 5));
       var fullW = fullRight - fullLeft;
-      // Tall band covers most of the letter body — avoids detecting internal letter features
-      var bandH = Math.max(10, Math.round(fontSize * 0.85));
+      // Tall band covers most of the letter body so internal features don't create false gaps
+      var bandH = Math.max(10, Math.round(fontSize * 0.9));
       var bandTop = Math.max(0, Math.round(ecy - bandH / 2));
       var bandActH = Math.min(ch - bandTop, bandH);
 
       var gapBridges = [];
       if (fullW > 0 && bandActH > 0) {
         var fd = ctx.getImageData(fullLeft, bandTop, fullW, bandActH);
-        // Build column darkness map using the tall scan band
+        // Build column darkness map: a column is "dark" if ANY pixel in the band is dark
         var colDark = new Uint8Array(fullW);
         for (var c = 0; c < fullW; c++) {
           for (var r = 0; r < bandActH; r++) {
@@ -1057,63 +1053,26 @@ export default function TextCircleTool() {
           }
         }
 
-        // Only check for gaps at character boundary positions
-        // This avoids bridging internal letter features entirely
+        // Find all pixel gaps: runs of consecutive non-dark columns
+        // that sit between two dark regions (i.e., between letters or between text and ring)
         ctx.fillStyle = "#000000";
-        for (var ci = 1; ci < line.length; ci++) {
-          var prefW = ctx.measureText(line.substring(0, ci)).width;
-          var bndX = Math.round(textStartX + prefW) - fullLeft;
-          if (bndX < 2 || bndX >= fullW - 2) continue;
-
-          // Check 3px window at this character boundary
-          var anyDk = false;
-          for (var cx = bndX - 1; cx <= bndX + 1; cx++) {
-            if (cx >= 0 && cx < fullW && colDark[cx]) { anyDk = true; break; }
-          }
-
-          if (!anyDk) {
-            // Gap at this character boundary — find its extent
-            var gl = bndX, gr = bndX;
-            while (gl > 0 && !colDark[gl - 1]) gl--;
-            while (gr < fullW - 1 && !colDark[gr + 1]) gr++;
-
-            // Bridge: overlap 2px into each letter edge
-            var gX = fullLeft + gl - 2;
-            var gW = (gr - gl) + 5;
-            ctx.fillRect(gX, ecy - bridgeH / 2, gW, bridgeH);
-            gapBridges.push([gX, ecy - bridgeH / 2, gW, bridgeH]);
-          }
-        }
-
-        // Bridge text-to-ring on left side if there's a gap
-        var ringInnerLeftRel = Math.round(ecx - irx) - fullLeft;
-        var textLeftRel = Math.round(textStartX) - fullLeft;
-        if (textLeftRel > ringInnerLeftRel + 3) {
-          var leftGap = false;
-          for (var lx = ringInnerLeftRel; lx < Math.min(textLeftRel, fullW); lx++) {
-            if (lx >= 0 && lx < fullW && !colDark[lx]) { leftGap = true; break; }
-          }
-          if (leftGap) {
-            var lbX = fullLeft + Math.max(0, ringInnerLeftRel - Math.ceil(borderPx * 0.3));
-            var lbW = fullLeft + textLeftRel + 3 - lbX;
-            ctx.fillRect(lbX, ecy - bridgeH / 2, lbW, bridgeH);
-            gapBridges.push([lbX, ecy - bridgeH / 2, lbW, bridgeH]);
-          }
-        }
-
-        // Bridge text-to-ring on right side if there's a gap
-        var ringInnerRightRel = Math.round(ecx + irx) - fullLeft;
-        var textRightRel = Math.round(textStartX + textMW) - fullLeft;
-        if (textRightRel < ringInnerRightRel - 3) {
-          var rightGap = false;
-          for (var rx = textRightRel; rx < Math.min(ringInnerRightRel, fullW); rx++) {
-            if (rx >= 0 && rx < fullW && !colDark[rx]) { rightGap = true; break; }
-          }
-          if (rightGap) {
-            var rbX = fullLeft + textRightRel - 3;
-            var rbW = fullLeft + Math.min(fullW, ringInnerRightRel + Math.ceil(borderPx * 0.3)) - rbX;
-            ctx.fillRect(rbX, ecy - bridgeH / 2, rbW, bridgeH);
-            gapBridges.push([rbX, ecy - bridgeH / 2, rbW, bridgeH]);
+        var inGap = false;
+        var gapStart = 0;
+        for (var c = 0; c <= fullW; c++) {
+          var dark = c < fullW ? colDark[c] : 1; // treat past-end as dark to close final gap
+          if (!dark && !inGap) {
+            inGap = true;
+            gapStart = c;
+          } else if (dark && inGap) {
+            inGap = false;
+            // Only bridge if there's dark material on both sides (not edge gaps)
+            if (gapStart > 0 && c < fullW) {
+              var gX = fullLeft + gapStart - bridgeOverlap;
+              var gW = (c - gapStart) + bridgeOverlap * 2;
+              var gY = Math.round(ecy - bridgeH / 2);
+              ctx.fillRect(gX, gY, gW, bridgeH);
+              gapBridges.push([gX, gY, gW, bridgeH]);
+            }
           }
         }
       }

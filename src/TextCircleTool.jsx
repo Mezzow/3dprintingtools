@@ -935,100 +935,130 @@ export default function TextCircleTool() {
       var fontSize = computeFontSizeForWidth(ctx, font.family, fontWeight, line, availW);
       fontSize = Math.max(16, Math.min(fontSize, iry * 1.5));
 
-      // === Single-pass render: draw everything on one canvas ===
+      // Helper: draw letter-gap connectors by scanning for pixel gaps
+      var drawLetterGapConnectors = function() {
+        ctx.font = fontWeight + " " + fontSize + "px " + font.family;
+        var mW = ctx.measureText(line).width;
+        var sL = Math.max(0, Math.floor(ecx - mW / 2) - 4);
+        var sR = Math.min(cw, Math.ceil(ecx + mW / 2) + 4);
+        var sT = Math.max(0, Math.floor(ecy - fontSize * 0.6));
+        var sB = Math.min(ch, Math.ceil(ecy + fontSize * 0.6));
+        var sW = sR - sL, sH = sB - sT;
+        if (sW <= 0 || sH <= 0) return;
 
-      // 1. White background
+        var sd = ctx.getImageData(sL, sT, sW, sH);
+        // Use threshold 200 to catch anti-aliased edges
+        var colHasBlack = new Array(sW);
+        for (var c = 0; c < sW; c++) {
+          colHasBlack[c] = false;
+          for (var r = 0; r < sH; r++) {
+            if (sd.data[(r * sW + c) * 4] < 200) {
+              colHasBlack[c] = true;
+              break;
+            }
+          }
+        }
+        var inGap = false, gS = 0, fB = false;
+        var barH = Math.max(fontSize * 0.15, 5);
+        ctx.fillStyle = "#000000";
+        for (var c2 = 0; c2 < sW; c2++) {
+          if (colHasBlack[c2]) {
+            fB = true;
+            if (inGap) {
+              // Fill gap with overlap of 3px into each side
+              ctx.fillRect(sL + gS - 3, ecy - barH / 2, c2 - gS + 6, barH);
+              inGap = false;
+            }
+          } else if (fB && !inGap) {
+            inGap = true;
+            gS = c2;
+          }
+        }
+      };
+
+      // Helper: draw text-to-ring connector bars
+      var drawTextToRingConnectors = function() {
+        if (!enableConnectors) return;
+        var connH = connectorThickness * 3;
+        ctx.fillStyle = "#000000";
+        ctx.font = fontWeight + " " + fontSize + "px " + font.family;
+        var mW = ctx.measureText(line).width;
+        var ringInnerHalfW = irx; // at center line, dy=0
+        var textHalfW = mW / 2;
+
+        var leftRingX = ecx - ringInnerHalfW;
+        var leftTextX = ecx - textHalfW;
+        if (leftTextX > leftRingX + 2) {
+          // Extend into ring border and overlap text edge
+          ctx.fillRect(leftRingX - borderPx, ecy - connH / 2,
+            leftTextX - leftRingX + borderPx + 4, connH);
+        }
+        var rightRingX = ecx + ringInnerHalfW;
+        var rightTextX = ecx + textHalfW;
+        if (rightTextX < rightRingX - 2) {
+          ctx.fillRect(rightTextX - 4, ecy - connH / 2,
+            rightRingX - rightTextX + borderPx + 4, connH);
+        }
+      };
+
+      // === PREVIEW IMAGE: draw everything on one canvas ===
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, cw, ch);
 
-      // 2. Black filled outer ellipse
+      // Outer ellipse (black)
       ctx.beginPath();
       ctx.ellipse(ecx, ecy, erx, ery, 0, 0, 2 * Math.PI);
       ctx.fillStyle = "#000000";
       ctx.fill();
 
-      // 3. White inner ellipse (creates the ring)
+      // Inner ellipse (white = creates ring)
       ctx.beginPath();
       ctx.ellipse(ecx, ecy, irx, iry, 0, 0, 2 * Math.PI);
       ctx.fillStyle = "#ffffff";
       ctx.fill();
 
-      // 4. Draw filled text in black
+      // Text
       ctx.fillStyle = "#000000";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.font = fontWeight + " " + fontSize + "px " + font.family;
       ctx.fillText(line, ecx, ecy);
 
-      // 5. Draw letter-to-letter connectors where pixel gaps exist between letters
-      var measuredW = ctx.measureText(line).width;
-      var scanLeft = Math.max(0, Math.floor(ecx - measuredW / 2) - 2);
-      var scanRight = Math.min(cw, Math.ceil(ecx + measuredW / 2) + 2);
-      var scanTop = Math.max(0, Math.floor(ecy - fontSize * 0.45));
-      var scanBot = Math.min(ch, Math.ceil(ecy + fontSize * 0.45));
-      var stripW = scanRight - scanLeft;
-      var stripH = scanBot - scanTop;
-      if (stripW > 0 && stripH > 0) {
-        var stripData = ctx.getImageData(scanLeft, scanTop, stripW, stripH);
-        var colHasBlack = new Array(stripW);
-        for (var cx2 = 0; cx2 < stripW; cx2++) {
-          colHasBlack[cx2] = false;
-          for (var cy2 = 0; cy2 < stripH; cy2++) {
-            if (stripData.data[(cy2 * stripW + cx2) * 4] < 128) {
-              colHasBlack[cx2] = true;
-              break;
-            }
-          }
-        }
-        // Find gaps: runs of all-white columns between black columns
-        var inGap = false, gapStart = 0;
-        var connBarH = Math.max(fontSize * 0.12, 3);
-        var foundFirstBlack = false;
-        ctx.fillStyle = "#000000";
-        for (var cx3 = 0; cx3 < stripW; cx3++) {
-          if (colHasBlack[cx3]) {
-            foundFirstBlack = true;
-            if (inGap) {
-              ctx.fillRect(scanLeft + gapStart - 1, ecy - connBarH / 2,
-                           cx3 - gapStart + 2, connBarH);
-              inGap = false;
-            }
-          } else if (foundFirstBlack && !inGap) {
-            inGap = true;
-            gapStart = cx3;
-          }
-        }
-      }
-
-      // 6. Draw connector bars from text to ring
-      if (enableConnectors) {
-        var connH = connectorThickness * 3;
-        ctx.fillStyle = "#000000";
-        var dy = ecy - ecy; // 0 for single centered line
-        var ratioSq = (dy * dy) / (iry * iry);
-        if (ratioSq < 1) {
-          var ringInnerHalfW = irx * Math.sqrt(1 - ratioSq);
-          var textHalfW = measuredW / 2;
-
-          var leftRingX = ecx - ringInnerHalfW;
-          var leftTextX = ecx - textHalfW;
-          if (leftTextX > leftRingX + 2) {
-            ctx.fillRect(leftRingX - borderPx * 0.5, ecy - connH / 2,
-              leftTextX - leftRingX + borderPx * 0.5 + 2, connH);
-          }
-          var rightRingX = ecx + ringInnerHalfW;
-          var rightTextX = ecx + textHalfW;
-          if (rightTextX < rightRingX - 2) {
-            ctx.fillRect(rightTextX - 2, ecy - connH / 2,
-              rightRingX - rightTextX + borderPx * 0.5 + 2, connH);
-          }
-        }
-      }
+      // Letter-gap connectors + text-to-ring connectors
+      drawLetterGapConnectors();
+      drawTextToRingConnectors();
 
       setPreviewDataUrl(cv.toDataURL());
 
-      // 7. Extract contours from the single combined canvas — everything is already drawn
-      var allContours = extractContoursFromCanvas(ctx, cw, ch, smoothIter, sharpAngle);
+      // === CONTOUR EXTRACTION: two separate passes for correct 3D ===
+
+      // Pass A: Ring only
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, cw, ch);
+      ctx.beginPath();
+      ctx.ellipse(ecx, ecy, erx, ery, 0, 0, 2 * Math.PI);
+      ctx.fillStyle = "#000000";
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(ecx, ecy, irx, iry, 0, 0, 2 * Math.PI);
+      ctx.fillStyle = "#ffffff";
+      ctx.fill();
+      var ringContours = extractContoursFromCanvas(ctx, cw, ch, smoothIter, sharpAngle);
+
+      // Pass B: Text + letter-gap connectors + text-to-ring connectors
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, cw, ch);
+      ctx.fillStyle = "#000000";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.font = fontWeight + " " + fontSize + "px " + font.family;
+      ctx.fillText(line, ecx, ecy);
+      drawLetterGapConnectors();
+      drawTextToRingConnectors();
+      var textContours = extractContoursFromCanvas(ctx, cw, ch, smoothIter, sharpAngle);
+
+      // Combine
+      var allContours = ringContours.concat(textContours);
       setContours(allContours);
 
       setDownloadUrl(null);

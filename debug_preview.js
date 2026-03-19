@@ -1,6 +1,4 @@
 // Debug script: renders the TextCircleTool preview to a PNG file
-// Usage: node debug_preview.js [output.png]
-
 var { createCanvas } = require("canvas");
 var fs = require("fs");
 
@@ -38,7 +36,7 @@ async function main() {
   }
   var fontSize = (lo + hi) / 2;
   fontSize = Math.max(16, Math.min(fontSize, iry * 1.5));
-  console.log("fontSize:", fontSize.toFixed(1), "canvas:", cw, "x", ch);
+  console.log("fontSize:", fontSize.toFixed(1));
 
   var drawBase = function(ringColor, textColor) {
     ctx.fillStyle = "#ffffff";
@@ -60,22 +58,21 @@ async function main() {
 
   drawBase("#000000", "#000000");
 
-  // === NEW CONNECTOR LOGIC ===
+  // === CONNECTOR LOGIC ===
   var bridgeH = Math.max(4, Math.round(fontSize * 0.06));
-  var bridgeOverlap = Math.max(4, Math.round(fontSize * 0.1));
+  // Generous overlap — since bridges are same color as letters, overlap is invisible
+  var bridgeOverlap = Math.max(6, Math.round(fontSize * 0.25));
 
-  // Scan entire width
   var fullLeft = Math.max(0, Math.floor(ecx - erx - 5));
   var fullRight = Math.min(cw, Math.ceil(ecx + erx + 5));
   var fullW = fullRight - fullLeft;
-  // Tall band: covers 90% of letter height - internal features like "o" holes
-  // have dark pixels at top/bottom arcs, so those columns stay "dark"
+  // Tall band (90% font height): internal features like "o" holes have dark pixels
+  // at top/bottom arcs, so those columns stay dark and don't create false gaps
   var bandH = Math.max(10, Math.round(fontSize * 0.9));
   var bandTop = Math.max(0, Math.round(ecy - bandH / 2));
   var bandActH = Math.min(ch - bandTop, bandH);
 
   console.log("bridgeH:", bridgeH, "bridgeOverlap:", bridgeOverlap);
-  console.log("bandH:", bandH, "bandTop:", bandTop, "bandActH:", bandActH);
 
   var gapBridges = [];
   if (fullW > 0 && bandActH > 0) {
@@ -83,52 +80,30 @@ async function main() {
     var colDark = new Uint8Array(fullW);
     for (var c = 0; c < fullW; c++) {
       for (var r = 0; r < bandActH; r++) {
-        if (fd.data[(r * fullW + c) * 4] < 128) {
-          colDark[c] = 1;
-          break;
-        }
+        if (fd.data[(r * fullW + c) * 4] < 128) { colDark[c] = 1; break; }
       }
     }
 
-    // Debug: print dark map
-    var textMW = ctx.measureText(text).width;
-    var textStartX = ecx - textMW / 2;
-    var debugLeft = Math.max(0, Math.round(textStartX) - fullLeft - 10);
-    var debugRight = Math.min(fullW, Math.round(textStartX + textMW) - fullLeft + 10);
-    console.log("\ncolDark map (tall band, < 128):");
-    var darkStr = "";
-    for (var c = debugLeft; c < debugRight; c++) {
-      darkStr += colDark[c] ? "#" : ".";
-    }
-    console.log(darkStr);
-
-    // Find gaps: runs of non-dark columns
     ctx.fillStyle = "#000000";
-    var inGap = false;
-    var gapStart = 0;
+    var inGap = false, gapStart = 0;
     for (var c = 0; c <= fullW; c++) {
       var dark = c < fullW ? colDark[c] : 1;
-      if (!dark && !inGap) {
-        inGap = true;
-        gapStart = c;
-      } else if (dark && inGap) {
+      if (!dark && !inGap) { inGap = true; gapStart = c; }
+      else if (dark && inGap) {
         inGap = false;
-        var gapW = c - gapStart;
-        // Only bridge if there's dark material on BOTH sides
         if (gapStart > 0 && c < fullW) {
-          // Bridge with generous fixed overlap into letters
           var gX = fullLeft + gapStart - bridgeOverlap;
-          var gW = gapW + bridgeOverlap * 2;
+          var gW = (c - gapStart) + bridgeOverlap * 2;
           var gY = Math.round(ecy - bridgeH / 2);
           ctx.fillRect(gX, gY, gW, bridgeH);
           gapBridges.push([gX, gY, gW, bridgeH]);
-          console.log("Gap col " + gapStart + "-" + (c-1) + " (w=" + gapW + ") -> rect(" + gX + "," + gY + "," + gW + "," + bridgeH + ")");
+          console.log("Gap col " + gapStart + "-" + (c-1) + " (w=" + (c-gapStart) + ") -> rect(" + gX + "," + gY + "," + gW + "," + bridgeH + ")");
         }
       }
     }
   }
 
-  console.log("\nTotal bridges:", gapBridges.length);
+  console.log("Total bridges:", gapBridges.length);
 
   // === PREVIEW ===
   drawBase("#555555", "#000000");
@@ -146,8 +121,7 @@ async function main() {
   ctx.ellipse(ecx, ecy, irx, iry, 0, 0, 2 * Math.PI);
   ctx.stroke();
 
-  var buf = cv.toBuffer("image/png");
-  fs.writeFileSync(outputFile, buf);
+  fs.writeFileSync(outputFile, cv.toBuffer("image/png"));
   console.log("Saved:", outputFile);
 }
 

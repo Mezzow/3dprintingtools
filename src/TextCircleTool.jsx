@@ -1031,7 +1031,7 @@ export default function TextCircleTool() {
       // (like the hole in o/e) are covered by pixels at other heights.
       // Generous overlap ensures bridges visually connect to letter strokes.
       var bridgeH = Math.max(4, Math.round(fontSize * 0.06));
-      var bridgeOverlap = Math.max(4, Math.round(fontSize * 0.1));
+      var bridgeOverlap = Math.max(6, Math.round(fontSize * 0.25));
 
       // Scan region: outer ring edge to outer ring edge
       var fullLeft = Math.max(0, Math.floor(ecx - erx - 5));

@@ -377,6 +377,126 @@ function signedArea(pts) {
   return a / 2;
 }
 
+function pointInPolygon(pt, poly) {
+  var x = pt[0], y = pt[1];
+  var inside = false;
+  for (var i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    var yi = poly[i][1], yj = poly[j][1];
+    if ((yi > y) !== (yj > y) &&
+        x < (poly[j][0] - poly[i][0]) * (y - yi) / (yj - yi) + poly[i][0]) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function classifyContours(contours) {
+  var infos = contours.map(function(c, i) {
+    return { idx: i, contour: c, area: signedArea(c), children: [] };
+  });
+
+  // Find the largest contour (ring outer boundary) to determine outer sign convention
+  var maxAbsArea = 0, outerSign = 1;
+  for (var i = 0; i < infos.length; i++) {
+    if (Math.abs(infos[i].area) > maxAbsArea) {
+      maxAbsArea = Math.abs(infos[i].area);
+      outerSign = infos[i].area < 0 ? -1 : 1;
+    }
+  }
+
+  for (var i2 = 0; i2 < infos.length; i2++) {
+    infos[i2].isOuter = (infos[i2].area * outerSign > 0);
+  }
+
+  var outers = infos.filter(function(c) { return c.isOuter; });
+  var holes = infos.filter(function(c) { return !c.isOuter; });
+
+  // Assign each hole to the smallest enclosing outer contour
+  for (var hi = 0; hi < holes.length; hi++) {
+    var holePt = holes[hi].contour[0];
+    var bestOuter = null;
+    var bestArea = Infinity;
+    for (var oi = 0; oi < outers.length; oi++) {
+      if (pointInPolygon(holePt, outers[oi].contour)) {
+        var absArea = Math.abs(outers[oi].area);
+        if (absArea < bestArea) {
+          bestArea = absArea;
+          bestOuter = oi;
+        }
+      }
+    }
+    if (bestOuter !== null) {
+      outers[bestOuter].children.push(holes[hi]);
+    }
+  }
+
+  return outers;
+}
+
+function bridgeHoleToOuter(outer, hole) {
+  // Find rightmost vertex of hole
+  var rightIdx = 0;
+  for (var i = 1; i < hole.length; i++) {
+    if (hole[i][0] > hole[rightIdx][0]) rightIdx = i;
+  }
+  var hp = hole[rightIdx];
+
+  // Cast ray from hp in +X direction, find nearest intersection with outer edges
+  var bestDist = Infinity, bestEdgeIdx = -1, bestPt = null;
+  for (var i2 = 0; i2 < outer.length; i2++) {
+    var j = (i2 + 1) % outer.length;
+    var a = outer[i2], b = outer[j];
+    if ((a[1] - hp[1]) * (b[1] - hp[1]) > 0) continue;
+    if (a[1] === b[1]) continue;
+    var t = (hp[1] - a[1]) / (b[1] - a[1]);
+    if (t < 0 || t > 1) continue;
+    var ix = a[0] + t * (b[0] - a[0]);
+    if (ix < hp[0]) continue;
+    var dist = ix - hp[0];
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestEdgeIdx = i2;
+      bestPt = [ix, hp[1]];
+    }
+  }
+
+  if (bestEdgeIdx < 0) return outer;
+
+  // Find the endpoint of the intersected edge closest to intersection
+  var ei = bestEdgeIdx;
+  var ej = (ei + 1) % outer.length;
+  var visIdx = (Math.hypot(outer[ei][0] - bestPt[0], outer[ei][1] - bestPt[1]) <
+                Math.hypot(outer[ej][0] - bestPt[0], outer[ej][1] - bestPt[1])) ? ei : ej;
+
+  // Build merged polygon: outer[0..visIdx] + hole[rightIdx..] + hole[..rightIdx] + outer[visIdx..]
+  var merged = [];
+  for (var m = 0; m <= visIdx; m++) merged.push(outer[m]);
+  for (var m2 = 0; m2 < hole.length; m2++) merged.push(hole[(rightIdx + m2) % hole.length]);
+  merged.push(hole[rightIdx]); // close hole loop back to bridge
+  for (var m3 = visIdx; m3 < outer.length; m3++) merged.push(outer[m3]);
+
+  return merged;
+}
+
+function earClipWithHoles(outer, holes) {
+  if (!holes || holes.length === 0) return earClip(outer);
+
+  // Sort holes by rightmost X descending (process rightmost first)
+  var sortedHoles = holes.slice().sort(function(a, b) {
+    var maxXa = -Infinity, maxXb = -Infinity;
+    for (var i = 0; i < a.length; i++) if (a[i][0] > maxXa) maxXa = a[i][0];
+    for (var i2 = 0; i2 < b.length; i2++) if (b[i2][0] > maxXb) maxXb = b[i2][0];
+    return maxXb - maxXa;
+  });
+
+  var merged = outer.slice();
+  for (var i = 0; i < sortedHoles.length; i++) {
+    merged = bridgeHoleToOuter(merged, sortedHoles[i]);
+  }
+
+  return earClip(merged);
+}
+
 function ptInTri(p, a, b, c) {
   var cross = function(o, a2, b2) { return (a2[0]-o[0])*(b2[1]-o[1]) - (a2[1]-o[1])*(b2[0]-o[0]); };
   var d1 = cross(p,a,b), d2 = cross(p,b,c), d3 = cross(p,c,a);
@@ -409,7 +529,7 @@ function earClip(polygon) {
   return tris;
 }
 
-function generateSolidMesh(contour, height, scale, bevelSteps, bevelBottom) {
+function generateSolidMesh(contour, height, scale, bevelSteps, bevelBottom, holeContours, skipCaps) {
   var n = contour.length;
   if (n < 3) return [];
   var tris = [];
@@ -466,19 +586,36 @@ function generateSolidMesh(contour, height, scale, bevelSteps, bevelBottom) {
       tris.push([a0, b1, b0]);
     }
   }
-  var topInset = profile[profile.length - 1].inset / scale;
-  var botInset = profile[0].inset / scale;
-  var topZ = profile[profile.length - 1].z;
-  var botZ = profile[0].z;
-  var topPoly = contour.map(function(p, i) {
-    return [(p[0] - scaledNormals[i][0] * topInset) * scale, (p[1] - scaledNormals[i][1] * topInset) * scale];
-  });
-  var topTris = earClip(topPoly);
-  for (var ti = 0; ti < topTris.length; ti++) {
-    var t = topTris[ti];
-    tris.push([[t[0][0],t[0][1],topZ],[t[1][0],t[1][1],topZ],[t[2][0],t[2][1],topZ]]);
-    tris.push([[t[0][0],t[0][1],botZ],[t[2][0],t[2][1],botZ],[t[1][0],t[1][1],botZ]]);
+
+  if (!skipCaps) {
+    var topInset = profile[profile.length - 1].inset / scale;
+    var botInset = profile[0].inset / scale;
+    var topZ = profile[profile.length - 1].z;
+    var botZ = profile[0].z;
+    var topPoly = contour.map(function(p, i) {
+      return [(p[0] - scaledNormals[i][0] * topInset) * scale, (p[1] - scaledNormals[i][1] * topInset) * scale];
+    });
+
+    // Build hole polygons for cap triangulation (with same inset)
+    var holePolys = [];
+    if (holeContours) {
+      for (var hi = 0; hi < holeContours.length; hi++) {
+        var hc = holeContours[hi];
+        var hNormals = computeNormals(hc);
+        holePolys.push(hc.map(function(p, idx) {
+          return [(p[0] - hNormals[idx][0] * topInset) * scale, (p[1] - hNormals[idx][1] * topInset) * scale];
+        }));
+      }
+    }
+
+    var topTris = earClipWithHoles(topPoly, holePolys);
+    for (var ti = 0; ti < topTris.length; ti++) {
+      var t = topTris[ti];
+      tris.push([[t[0][0],t[0][1],topZ],[t[1][0],t[1][1],topZ],[t[2][0],t[2][1],topZ]]);
+      tris.push([[t[0][0],t[0][1],botZ],[t[2][0],t[2][1],botZ],[t[1][0],t[1][1],botZ]]);
+    }
   }
+
   return tris;
 }
 
@@ -526,12 +663,35 @@ function arrayBufferToBase64(buffer) {
 function buildTriangles(contours, mode, targetWidth, imgW, wallThickness, extrudeHeight, bevelSteps, bevelBottom) {
   var scale = targetWidth / (imgW || 100);
   var allTris = [];
-  for (var ci = 0; ci < contours.length; ci++) {
-    var tris = mode === "frame"
-      ? generateFrameMesh(contours[ci], wallThickness, extrudeHeight, scale, bevelSteps, bevelBottom)
-      : generateSolidMesh(contours[ci], extrudeHeight, scale, bevelSteps, bevelBottom);
-    allTris = allTris.concat(tris);
+
+  if (mode === "frame") {
+    for (var ci = 0; ci < contours.length; ci++) {
+      allTris = allTris.concat(
+        generateFrameMesh(contours[ci], wallThickness, extrudeHeight, scale, bevelSteps, bevelBottom)
+      );
+    }
+  } else {
+    // Solid mode: classify contours into outers and holes for proper cap generation
+    var classified = classifyContours(contours);
+
+    for (var oi = 0; oi < classified.length; oi++) {
+      var outer = classified[oi];
+      var holeContours = outer.children.map(function(h) { return h.contour; });
+
+      // Outer contour: walls + caps with holes subtracted
+      allTris = allTris.concat(
+        generateSolidMesh(outer.contour, extrudeHeight, scale, bevelSteps, bevelBottom, holeContours, false)
+      );
+
+      // Hole contours: walls only (caps handled by outer's merged polygon)
+      for (var hi = 0; hi < holeContours.length; hi++) {
+        allTris = allTris.concat(
+          generateSolidMesh(holeContours[hi], extrudeHeight, scale, bevelSteps, bevelBottom, null, true)
+        );
+      }
+    }
   }
+
   return allTris;
 }
 
@@ -697,7 +857,7 @@ export default function TextCircleTool() {
   var sd = _s(150), targetWidth = sd[0], setTargetWidth = sd[1];
   var se = _s(5), extrudeHeight = se[0], setExtrudeHeight = se[1];
   var sf = _s(2.0), wallThickness = sf[0], setWallThickness = sf[1];
-  var sg = _s("frame"), mode = sg[0], setMode = sg[1];
+  var sg = _s("solid"), mode = sg[0], setMode = sg[1];
   var sh = _s(4), bevelSteps = sh[0], setBevelSteps = sh[1];
   var si = _s(false), bevelBottom = si[0], setBevelBottom = si[1];
   var sj = _s(2), smoothIter = sj[0], setSmoothIter = sj[1];
@@ -825,6 +985,22 @@ export default function TextCircleTool() {
         var info = lineInfos[li3];
         ctx.font = fontWeight + " " + info.fontSize + "px " + font.family;
         ctx.fillText(info.text, ecx, info.y);
+      }
+
+      // 5b. Draw letter-to-letter connectors within each line
+      ctx.fillStyle = "#000000";
+      for (var li5 = 0; li5 < lineInfos.length; li5++) {
+        var inf2 = lineInfos[li5];
+        ctx.font = fontWeight + " " + inf2.fontSize + "px " + font.family;
+        var fullW = ctx.measureText(inf2.text).width;
+        var startX = ecx - fullW / 2;
+        var connBarH = inf2.fontSize * 0.12;
+        var connBarW = Math.max(3, inf2.fontSize * 0.06);
+        for (var k = 0; k < inf2.text.length - 1; k++) {
+          if (inf2.text[k] === ' ' || inf2.text[k + 1] === ' ') continue;
+          var boundaryX = startX + ctx.measureText(inf2.text.substring(0, k + 1)).width;
+          ctx.fillRect(boundaryX - connBarW / 2, inf2.y - connBarH / 2, connBarW, connBarH);
+        }
       }
 
       // 6. Draw connector bars (bridges from text to ring)

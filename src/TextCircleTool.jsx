@@ -872,7 +872,7 @@ export default function TextCircleTool() {
   var sj = _s(2), smoothIter = sj[0], setSmoothIter = sj[1];
   var sk = _s(120), sharpAngle = sk[0], setSharpAngle = sk[1];
   var sm = _s(1.3), ellipseRatio = sm[0], setEllipseRatio = sm[1];
-  var sn = _s(2.0), borderThickness = sn[0], setBorderThickness = sn[1];
+  var sn = _s(5.0), borderThickness = sn[0], setBorderThickness = sn[1];
   var so = _s([]), contours = so[0], setContours = so[1];
   var sp = _s([]), previewTris = sp[0], setPreviewTris = sp[1];
   var sq = _s(null), downloadUrl = sq[0], setDownloadUrl = sq[1];
@@ -881,8 +881,6 @@ export default function TextCircleTool() {
   var st = _s(null), previewDataUrl = st[0], setPreviewDataUrl = st[1];
   var su = _s(""), fontSearch = su[0], setFontSearch = su[1];
   var sv = _s(1.1), textOverlap = sv[0], setTextOverlap = sv[1];
-  var sw = _s(true), enableConnectors = sw[0], setEnableConnectors = sw[1];
-  var sx = _s(2.0), connectorThickness = sx[0], setConnectorThickness = sx[1];
   var sy = _s(0), textYOffset = sy[0], setTextYOffset = sy[1];
 
   _e(function() {
@@ -911,162 +909,91 @@ export default function TextCircleTool() {
     var font = FONTS[fontIdx];
     loadFont(font).then(function() {
       var cv = document.createElement("canvas");
-      var ctx = cv.getContext("2d");
       var fontWeight = bold ? "bold" : "normal";
 
-      // Fixed canvas size — ellipse fills the canvas
       var cw = 800;
       var ch = Math.max(400, Math.round(800 / ellipseRatio));
       cv.width = cw;
       cv.height = ch;
-      ctx = cv.getContext("2d");
+      var ctx = cv.getContext("2d");
 
       var ecx = cw / 2;
       var ecy = ch / 2 + textYOffset * 2;
       var margin = 20;
       var erx = cw / 2 - margin;
       var ery = ch / 2 - margin;
-      var borderPx = borderThickness * 3;
+      var borderPx = borderThickness * 4;
       var irx = Math.max(1, erx - borderPx);
       var iry = Math.max(1, ery - borderPx);
 
-      // Compute font size to fit text within inner ellipse width
+      // Compute font size to fit text within inner ellipse width * overlap factor
       var availW = 2 * irx * textOverlap;
       var fontSize = computeFontSizeForWidth(ctx, font.family, fontWeight, line, availW);
       fontSize = Math.max(16, Math.min(fontSize, iry * 1.5));
 
-      // Helper: draw letter-gap connectors by scanning for pixel gaps
-      var drawLetterGapConnectors = function() {
-        ctx.font = fontWeight + " " + fontSize + "px " + font.family;
-        var mW = ctx.measureText(line).width;
-        var sL = Math.max(0, Math.floor(ecx - mW / 2) - 4);
-        var sR = Math.min(cw, Math.ceil(ecx + mW / 2) + 4);
-        var sT = Math.max(0, Math.floor(ecy - fontSize * 0.6));
-        var sB = Math.min(ch, Math.ceil(ecy + fontSize * 0.6));
-        var sW = sR - sL, sH = sB - sT;
-        if (sW <= 0 || sH <= 0) return;
-
-        var sd = ctx.getImageData(sL, sT, sW, sH);
-        // Use threshold 200 to catch anti-aliased edges
-        var colHasBlack = new Array(sW);
-        for (var c = 0; c < sW; c++) {
-          colHasBlack[c] = false;
-          for (var r = 0; r < sH; r++) {
-            if (sd.data[(r * sW + c) * 4] < 200) {
-              colHasBlack[c] = true;
-              break;
-            }
-          }
-        }
-        var inGap = false, gS = 0, fB = false;
-        var barH = Math.max(fontSize * 0.15, 5);
-        ctx.fillStyle = "#000000";
-        for (var c2 = 0; c2 < sW; c2++) {
-          if (colHasBlack[c2]) {
-            fB = true;
-            if (inGap) {
-              // Fill gap with overlap of 3px into each side
-              ctx.fillRect(sL + gS - 3, ecy - barH / 2, c2 - gS + 6, barH);
-              inGap = false;
-            }
-          } else if (fB && !inGap) {
-            inGap = true;
-            gS = c2;
-          }
-        }
-      };
-
-      // Helper: draw text-to-ring connector bars
-      var drawTextToRingConnectors = function() {
-        if (!enableConnectors) return;
-        var connH = connectorThickness * 3;
-        ctx.fillStyle = "#000000";
-        ctx.font = fontWeight + " " + fontSize + "px " + font.family;
-        var mW = ctx.measureText(line).width;
-        var ringInnerHalfW = irx; // at center line, dy=0
-        var textHalfW = mW / 2;
-
-        var leftRingX = ecx - ringInnerHalfW;
-        var leftTextX = ecx - textHalfW;
-        if (leftTextX > leftRingX + 2) {
-          // Extend into ring border and overlap text edge
-          ctx.fillRect(leftRingX - borderPx, ecy - connH / 2,
-            leftTextX - leftRingX + borderPx + 4, connH);
-        }
-        var rightRingX = ecx + ringInnerHalfW;
-        var rightTextX = ecx + textHalfW;
-        if (rightTextX < rightRingX - 2) {
-          ctx.fillRect(rightTextX - 4, ecy - connH / 2,
-            rightRingX - rightTextX + borderPx + 4, connH);
-        }
-      };
-
-      // === PREVIEW IMAGE: draw everything on one canvas ===
+      // === DRAW COMBINED SHAPE for contour extraction (single pass) ===
+      // Everything black on white. Ring + text + connector strip = one connected shape.
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, cw, ch);
 
-      // Outer ellipse (black)
+      // 1. Filled ring: outer ellipse black, inner ellipse white
       ctx.beginPath();
       ctx.ellipse(ecx, ecy, erx, ery, 0, 0, 2 * Math.PI);
       ctx.fillStyle = "#000000";
       ctx.fill();
-
-      // Inner ellipse (white = creates ring)
       ctx.beginPath();
       ctx.ellipse(ecx, ecy, irx, iry, 0, 0, 2 * Math.PI);
       ctx.fillStyle = "#ffffff";
       ctx.fill();
 
-      // Text
+      // 2. Filled text
       ctx.fillStyle = "#000000";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.font = fontWeight + " " + fontSize + "px " + font.family;
       ctx.fillText(line, ecx, ecy);
 
-      // Letter-gap connectors + text-to-ring connectors
-      drawLetterGapConnectors();
-      drawTextToRingConnectors();
+      // 3. Thin connecting strip at text center — bridges text to ring
+      // Spans from outer ring left edge to outer ring right edge
+      // Barely visible in print (~0.5mm) but structurally connects everything
+      var stripH = Math.max(3, Math.round(fontSize * 0.04));
+      ctx.fillStyle = "#000000";
+      ctx.fillRect(ecx - erx, ecy - stripH / 2, 2 * erx, stripH);
+
+      // Single-pass contour extraction from combined shape
+      var allContours = extractContoursFromCanvas(ctx, cw, ch, smoothIter, sharpAngle);
+      setContours(allContours);
+
+      // === PREVIEW IMAGE: redraw with visual distinction ===
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, cw, ch);
+      // Ring in dark gray
+      ctx.beginPath();
+      ctx.ellipse(ecx, ecy, erx, ery, 0, 0, 2 * Math.PI);
+      ctx.fillStyle = "#555555";
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(ecx, ecy, irx, iry, 0, 0, 2 * Math.PI);
+      ctx.fillStyle = "#ffffff";
+      ctx.fill();
+      // Text in black
+      ctx.fillStyle = "#000000";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.font = fontWeight + " " + fontSize + "px " + font.family;
+      ctx.fillText(line, ecx, ecy);
+      // Connector strip in subtle gray
+      ctx.fillStyle = "#999999";
+      ctx.fillRect(ecx - erx, ecy - stripH / 2, 2 * erx, stripH);
 
       setPreviewDataUrl(cv.toDataURL());
-
-      // === CONTOUR EXTRACTION: two separate passes for correct 3D ===
-
-      // Pass A: Ring only
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, cw, ch);
-      ctx.beginPath();
-      ctx.ellipse(ecx, ecy, erx, ery, 0, 0, 2 * Math.PI);
-      ctx.fillStyle = "#000000";
-      ctx.fill();
-      ctx.beginPath();
-      ctx.ellipse(ecx, ecy, irx, iry, 0, 0, 2 * Math.PI);
-      ctx.fillStyle = "#ffffff";
-      ctx.fill();
-      var ringContours = extractContoursFromCanvas(ctx, cw, ch, smoothIter, sharpAngle);
-
-      // Pass B: Text + letter-gap connectors + text-to-ring connectors
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, cw, ch);
-      ctx.fillStyle = "#000000";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.font = fontWeight + " " + fontSize + "px " + font.family;
-      ctx.fillText(line, ecx, ecy);
-      drawLetterGapConnectors();
-      drawTextToRingConnectors();
-      var textContours = extractContoursFromCanvas(ctx, cw, ch, smoothIter, sharpAngle);
-
-      // Combine
-      var allContours = ringContours.concat(textContours);
-      setContours(allContours);
 
       setDownloadUrl(null);
       var cleanName = line.replace(/[^a-zA-Z0-9äöüÄÖÜß_]/g, "").substring(0, 30);
       setFileName(cleanName || "text_circle");
     });
   }, [text, fontIdx, bold, ellipseRatio, borderThickness, smoothIter, sharpAngle,
-      textOverlap, enableConnectors, connectorThickness, textYOffset]);
+      textOverlap, textYOffset]);
 
   _e(function() {
     renderAndExtract();
@@ -1208,32 +1135,16 @@ export default function TextCircleTool() {
           onChange={setEllipseRatio} display={ellipseRatio.toFixed(2) + "x"} />
         <SliderRow label="Rahmen-Staerke"
           desc="Dicke des Ellipsen-Rahmens"
-          value={borderThickness} min={0.5} max={6} step={0.25}
+          value={borderThickness} min={1} max={10} step={0.5}
           onChange={setBorderThickness} display={borderThickness.toFixed(1)} />
         <SliderRow label="Text-Ueberlappung"
-          desc="Wie weit Text ueber den Innenrand hinausreicht (>1 = Text kreuzt den Ring)"
+          desc="Wie weit der Text ueber den Innenrand hinausreicht (>1 = Text kreuzt den Rahmen)"
           value={textOverlap} min={0.7} max={1.5} step={0.05}
           onChange={setTextOverlap} display={textOverlap.toFixed(2) + "x"} />
         <SliderRow label="Text vertikal verschieben"
           desc="Text nach oben oder unten verschieben"
           value={textYOffset} min={-50} max={50} step={1}
           onChange={setTextYOffset} display={textYOffset + " px"} />
-        <div style={{ marginTop: 6, marginBottom: 8 }}>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <PillButton active={enableConnectors} onClick={function() { setEnableConnectors(true); }}>
-              Verbindungs-Stege an
-            </PillButton>
-            <PillButton active={!enableConnectors} onClick={function() { setEnableConnectors(false); }}>
-              Verbindungs-Stege aus
-            </PillButton>
-          </div>
-        </div>
-        {enableConnectors && (
-          <SliderRow label="Steg-Staerke"
-            desc="Dicke der Verbindungsstege zwischen Text und Ring"
-            value={connectorThickness} min={0.5} max={5} step={0.25}
-            onChange={setConnectorThickness} display={connectorThickness.toFixed(1)} />
-        )}
       </Section>
 
       {previewDataUrl && (

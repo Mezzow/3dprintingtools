@@ -115,6 +115,7 @@ function chainSegments(segments) {
     var chain = [segments[si][0], segments[si][1]];
     used.add(si);
     var changed = true;
+    // Grow from the END
     while (changed) {
       changed = false;
       var endKey = key(chain[chain.length - 1]);
@@ -123,6 +124,21 @@ function chainSegments(segments) {
         if (!used.has(neighbors[ni].idx)) {
           used.add(neighbors[ni].idx);
           chain.push(neighbors[ni].pt);
+          changed = true;
+          break;
+        }
+      }
+    }
+    // Grow from the START (fixes incomplete loops when starting mid-contour)
+    changed = true;
+    while (changed) {
+      changed = false;
+      var startKey = key(chain[0]);
+      var neighbors2 = adj.get(startKey) || [];
+      for (var ni2 = 0; ni2 < neighbors2.length; ni2++) {
+        if (!used.has(neighbors2[ni2].idx)) {
+          used.add(neighbors2[ni2].idx);
+          chain.unshift(neighbors2[ni2].pt);
           changed = true;
           break;
         }
@@ -681,25 +697,80 @@ function extractContoursFromCanvas(ctx, cw, ch, smoothIter, sharpAngle) {
 
 function buildTriangles(contours, targetWidth, imgW, extrudeHeight, bevelSteps, bevelBottom) {
   var scale = targetWidth / (imgW || 100);
-  var allTris = [];
-
-  // Solid mode: classify contours into outers and holes for proper cap generation
   var classified = classifyContours(contours);
+  var allTris = [];
+  var bevelR = bevelSteps > 0 ? Math.min(extrudeHeight * 0.25, 1.2) : 0;
 
   for (var oi = 0; oi < classified.length; oi++) {
     var outer = classified[oi];
-    var holeContours = outer.children.map(function(h) { return h.contour; });
+    var oc = outer.contour;
+    if (oc.length < 3) continue;
 
-    // Outer contour: walls + caps with holes subtracted
-    allTris = allTris.concat(
-      generateSolidMesh(outer.contour, extrudeHeight, scale, bevelSteps, bevelBottom, holeContours, false)
-    );
+    // Create THREE.Shape from outer contour (scaled to mm)
+    var shape = new THREE.Shape();
+    shape.moveTo(oc[0][0] * scale, oc[0][1] * scale);
+    for (var i = 1; i < oc.length; i++) {
+      shape.lineTo(oc[i][0] * scale, oc[i][1] * scale);
+    }
 
-    // Hole contours: walls only (caps handled by outer's merged polygon)
-    for (var hi = 0; hi < holeContours.length; hi++) {
-      allTris = allTris.concat(
-        generateSolidMesh(holeContours[hi], extrudeHeight, scale, bevelSteps, bevelBottom, null, true)
-      );
+    // Add hole paths
+    for (var hi = 0; hi < outer.children.length; hi++) {
+      var hc = outer.children[hi].contour;
+      if (hc.length < 3) continue;
+      var holePath = new THREE.Path();
+      holePath.moveTo(hc[0][0] * scale, hc[0][1] * scale);
+      for (var j = 1; j < hc.length; j++) {
+        holePath.lineTo(hc[j][0] * scale, hc[j][1] * scale);
+      }
+      shape.holes.push(holePath);
+    }
+
+    // Use Three.js ExtrudeGeometry for robust triangulation (earcut-based)
+    // This fixes the hollow/outline issue from the broken custom ear clipping
+    var geo = new THREE.ExtrudeGeometry(shape, {
+      depth: extrudeHeight,
+      bevelEnabled: bevelSteps > 0,
+      bevelThickness: bevelR,
+      bevelSize: bevelR,
+      bevelSegments: bevelSteps
+    });
+
+    // Extract triangles from geometry
+    var posArr = geo.attributes.position.array;
+    var idxArr = geo.index ? geo.index.array : null;
+    if (idxArr) {
+      for (var ti = 0; ti < idxArr.length; ti += 3) {
+        var a = idxArr[ti], b = idxArr[ti + 1], c = idxArr[ti + 2];
+        allTris.push([
+          [posArr[a * 3], posArr[a * 3 + 1], posArr[a * 3 + 2]],
+          [posArr[b * 3], posArr[b * 3 + 1], posArr[b * 3 + 2]],
+          [posArr[c * 3], posArr[c * 3 + 1], posArr[c * 3 + 2]]
+        ]);
+      }
+    } else {
+      for (var vi = 0; vi < posArr.length; vi += 9) {
+        allTris.push([
+          [posArr[vi], posArr[vi + 1], posArr[vi + 2]],
+          [posArr[vi + 3], posArr[vi + 4], posArr[vi + 5]],
+          [posArr[vi + 6], posArr[vi + 7], posArr[vi + 8]]
+        ]);
+      }
+    }
+    geo.dispose();
+  }
+
+  // Shift geometry so minimum z is 0 (bevel may extend below)
+  var minZ = Infinity;
+  for (var ti2 = 0; ti2 < allTris.length; ti2++) {
+    for (var tj = 0; tj < 3; tj++) {
+      if (allTris[ti2][tj][2] < minZ) minZ = allTris[ti2][tj][2];
+    }
+  }
+  if (minZ !== 0 && isFinite(minZ)) {
+    for (var ti3 = 0; ti3 < allTris.length; ti3++) {
+      for (var tj2 = 0; tj2 < 3; tj2++) {
+        allTris[ti3][tj2][2] -= minZ;
+      }
     }
   }
 
@@ -931,60 +1002,98 @@ export default function TextCircleTool() {
       var fontSize = computeFontSizeForWidth(ctx, font.family, fontWeight, line, availW);
       fontSize = Math.max(16, Math.min(fontSize, iry * 1.5));
 
-      // === DRAW COMBINED SHAPE for contour extraction (single pass) ===
-      // Everything black on white. Ring + text + connector strip = one connected shape.
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, cw, ch);
+      // Helper: draw the base shape (ring + text) with given colors
+      var drawBase = function(ringColor, textColor) {
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, cw, ch);
+        // Ring: outer ellipse filled, inner ellipse white cutout
+        ctx.beginPath();
+        ctx.ellipse(ecx, ecy, erx, ery, 0, 0, 2 * Math.PI);
+        ctx.fillStyle = ringColor;
+        ctx.fill();
+        ctx.beginPath();
+        ctx.ellipse(ecx, ecy, irx, iry, 0, 0, 2 * Math.PI);
+        ctx.fillStyle = "#ffffff";
+        ctx.fill();
+        // Filled text
+        ctx.fillStyle = textColor;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.font = fontWeight + " " + fontSize + "px " + font.family;
+        ctx.fillText(line, ecx, ecy);
+      };
 
-      // 1. Filled ring: outer ellipse black, inner ellipse white
-      ctx.beginPath();
-      ctx.ellipse(ecx, ecy, erx, ery, 0, 0, 2 * Math.PI);
-      ctx.fillStyle = "#000000";
-      ctx.fill();
-      ctx.beginPath();
-      ctx.ellipse(ecx, ecy, irx, iry, 0, 0, 2 * Math.PI);
-      ctx.fillStyle = "#ffffff";
-      ctx.fill();
+      // === Draw combined shape in black for contour extraction ===
+      drawBase("#000000", "#000000");
 
-      // 2. Filled text
-      ctx.fillStyle = "#000000";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
+      // Smart connectors: scan for gaps at text center and bridge only where needed
+      var bridgeH = 3;
       ctx.font = fontWeight + " " + fontSize + "px " + font.family;
-      ctx.fillText(line, ecx, ecy);
+      var textMW = ctx.measureText(line).width;
+      // Scan region spans from outer ring edge to outer ring edge (or text edge, whichever is wider)
+      var scanLeft = Math.max(0, Math.floor(Math.min(ecx - erx, ecx - textMW / 2) - 2));
+      var scanRight = Math.min(cw, Math.ceil(Math.max(ecx + erx, ecx + textMW / 2) + 2));
+      var scanW = scanRight - scanLeft;
+      var scanBandH = Math.max(6, Math.round(fontSize * 0.4));
+      var scanTop = Math.max(0, Math.round(ecy - scanBandH / 2));
+      var scanActualH = Math.min(ch - scanTop, scanBandH);
 
-      // 3. Thin connecting strip at text center — bridges text to ring
-      // Spans from outer ring left edge to outer ring right edge
-      // Barely visible in print (~0.5mm) but structurally connects everything
-      var stripH = Math.max(3, Math.round(fontSize * 0.04));
-      ctx.fillStyle = "#000000";
-      ctx.fillRect(ecx - erx, ecy - stripH / 2, 2 * erx, stripH);
+      var gapBridges = [];
+      if (scanW > 0 && scanActualH > 0) {
+        var sd = ctx.getImageData(scanLeft, scanTop, scanW, scanActualH);
+        var colDark = new Array(scanW);
+        for (var c = 0; c < scanW; c++) {
+          colDark[c] = false;
+          for (var r = 0; r < scanActualH; r++) {
+            if (sd.data[(r * scanW + c) * 4] < 128) {
+              colDark[c] = true;
+              break;
+            }
+          }
+        }
 
-      // Single-pass contour extraction from combined shape
+        // Find gaps between dark regions and bridge them
+        var seenDark = false, inGap = false, gapStart = 0;
+        ctx.fillStyle = "#000000";
+        for (var c2 = 0; c2 < scanW; c2++) {
+          if (colDark[c2]) {
+            if (!seenDark) seenDark = true;
+            if (inGap) {
+              // Bridge this gap with thin strip, overlapping 2px into dark on each side
+              var gX = scanLeft + gapStart - 2;
+              var gW = c2 - gapStart + 4;
+              ctx.fillRect(gX, ecy - bridgeH / 2, gW, bridgeH);
+              gapBridges.push([gX, ecy - bridgeH / 2, gW, bridgeH]);
+              inGap = false;
+            }
+          } else if (seenDark && !inGap) {
+            inGap = true;
+            gapStart = c2;
+          }
+        }
+      }
+
+      // Single-pass contour extraction from the combined shape
       var allContours = extractContoursFromCanvas(ctx, cw, ch, smoothIter, sharpAngle);
       setContours(allContours);
 
       // === PREVIEW IMAGE: redraw with visual distinction ===
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, cw, ch);
-      // Ring in dark gray
+      drawBase("#555555", "#000000");
+      // Show bridges subtly in preview
+      ctx.fillStyle = "#888888";
+      for (var bi = 0; bi < gapBridges.length; bi++) {
+        var b = gapBridges[bi];
+        ctx.fillRect(b[0], b[1], b[2], b[3]);
+      }
+      // Draw ring outline for clarity
       ctx.beginPath();
       ctx.ellipse(ecx, ecy, erx, ery, 0, 0, 2 * Math.PI);
-      ctx.fillStyle = "#555555";
-      ctx.fill();
+      ctx.strokeStyle = "#444444";
+      ctx.lineWidth = 1;
+      ctx.stroke();
       ctx.beginPath();
       ctx.ellipse(ecx, ecy, irx, iry, 0, 0, 2 * Math.PI);
-      ctx.fillStyle = "#ffffff";
-      ctx.fill();
-      // Text in black
-      ctx.fillStyle = "#000000";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.font = fontWeight + " " + fontSize + "px " + font.family;
-      ctx.fillText(line, ecx, ecy);
-      // Connector strip in subtle gray
-      ctx.fillStyle = "#999999";
-      ctx.fillRect(ecx - erx, ecy - stripH / 2, 2 * erx, stripH);
+      ctx.stroke();
 
       setPreviewDataUrl(cv.toDataURL());
 

@@ -691,7 +691,7 @@ function Preview3D({ triangles }) {
 export default function TextCircleTool() {
   var _s = useState, _r = useRef, _e = useEffect, _c = useCallback;
 
-  var sa = _s("Christian"), text = sa[0], setText = sa[1];
+  var sa = _s("Hand\nin\nHand"), text = sa[0], setText = sa[1];
   var sb = _s(4), fontIdx = sb[0], setFontIdx = sb[1];
   var sc = _s(false), bold = sc[0], setBold = sc[1];
   var sd = _s(150), targetWidth = sd[0], setTargetWidth = sd[1];
@@ -712,13 +712,28 @@ export default function TextCircleTool() {
   var ss = _s(""), fileName = ss[0], setFileName = ss[1];
   var st = _s(null), previewDataUrl = st[0], setPreviewDataUrl = st[1];
   var su = _s(""), fontSearch = su[0], setFontSearch = su[1];
+  var sv = _s(1.1), textOverlap = sv[0], setTextOverlap = sv[1];
+  var sw = _s(true), enableConnectors = sw[0], setEnableConnectors = sw[1];
+  var sx = _s(2.0), connectorThickness = sx[0], setConnectorThickness = sx[1];
+  var sy = _s(0), textYOffset = sy[0], setTextYOffset = sy[1];
 
   _e(function() {
     loadFont(FONTS[fontIdx]);
   }, []);
 
+  var computeFontSizeForWidth = function(ctx, fontFamily, fontWeight, txt, targetWidth) {
+    var lo = 8, hi = 500;
+    for (var i = 0; i < 25; i++) {
+      var mid = (lo + hi) / 2;
+      ctx.font = fontWeight + " " + mid + "px " + fontFamily;
+      if (ctx.measureText(txt).width < targetWidth) lo = mid; else hi = mid;
+    }
+    return (lo + hi) / 2;
+  };
+
   var renderAndExtract = _c(function() {
-    if (!text.trim()) {
+    var lines = text.split("\n").filter(function(l) { return l.trim(); });
+    if (lines.length === 0) {
       setContours([]);
       setPreviewTris([]);
       setPreviewDataUrl(null);
@@ -729,52 +744,129 @@ export default function TextCircleTool() {
     loadFont(font).then(function() {
       var cv = document.createElement("canvas");
       var ctx = cv.getContext("2d");
-
-      var fontSize = 120;
       var fontWeight = bold ? "bold" : "normal";
-      ctx.font = fontWeight + " " + fontSize + "px " + font.family;
-      var metrics = ctx.measureText(text);
-      var textW = metrics.width;
-      var textH = fontSize;
 
-      var pad = padding * 3;
-      var cw = Math.ceil(textW + pad * 2 + borderThickness * 6);
-      var ch = Math.ceil(textH * ellipseRatio + pad * 2 + borderThickness * 6);
+      // Fixed canvas size — ellipse fills the canvas
+      var cw = 800;
+      var ch = Math.max(400, Math.round(800 / ellipseRatio));
       cv.width = cw;
       cv.height = ch;
-
       ctx = cv.getContext("2d");
+
+      var ecx = cw / 2;
+      var ecy = ch / 2 + textYOffset * 2;
+      var margin = 20;
+      var erx = cw / 2 - margin;
+      var ery = ch / 2 - margin;
+      var borderPx = borderThickness * 3;
+      var irx = Math.max(1, erx - borderPx);
+      var iry = Math.max(1, ery - borderPx);
+
+      // 1. White background
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, cw, ch);
 
-      var ecx = cw / 2;
-      var ecy = ch / 2;
-      var erx = textW / 2 + pad;
-      var ery = (textH * ellipseRatio) / 2 + pad;
-
+      // 2. Black outer ellipse
       ctx.beginPath();
       ctx.ellipse(ecx, ecy, erx, ery, 0, 0, 2 * Math.PI);
       ctx.fillStyle = "#000000";
       ctx.fill();
 
+      // 3. White inner ellipse (creates the ring)
       ctx.beginPath();
-      ctx.ellipse(ecx, ecy, Math.max(1, erx - borderThickness * 3), Math.max(1, ery - borderThickness * 3), 0, 0, 2 * Math.PI);
+      ctx.ellipse(ecx, ecy, irx, iry, 0, 0, 2 * Math.PI);
       ctx.fillStyle = "#ffffff";
       ctx.fill();
 
+      // 4. Compute line positions and font sizes
+      var numLines = lines.length;
+      var lineSpacing = padding * 2;
+      var totalTextHeight;
+      // Estimate line height with a test font size
+      ctx.font = fontWeight + " 100px " + font.family;
+      var testMetrics = ctx.measureText("Mg");
+      var lineHeightRatio = 1.2; // approximate line height to font size ratio
+
+      // Distribute lines vertically centered in the ellipse
+      var lineInfos = [];
+      // First pass: compute rough font sizes to estimate total height
+      var roughSizes = [];
+      for (var li = 0; li < numLines; li++) {
+        // Assume even vertical distribution for first pass
+        var roughY = ecy + ((li - (numLines - 1) / 2) * 100);
+        var dy = roughY - ecy;
+        var availW = 2 * irx * Math.sqrt(Math.max(0.01, 1 - (dy * dy) / (iry * iry)));
+        var fs = computeFontSizeForWidth(ctx, font.family, fontWeight, lines[li], availW * textOverlap);
+        roughSizes.push(Math.min(fs, iry * 2 / numLines));
+      }
+
+      // Compute total height and spacing
+      var avgSize = roughSizes.reduce(function(a, b) { return a + b; }, 0) / roughSizes.length;
+      var lineStep = avgSize * lineHeightRatio + lineSpacing;
+      totalTextHeight = lineStep * (numLines - 1);
+
+      // Second pass: compute actual positions and font sizes
+      for (var li2 = 0; li2 < numLines; li2++) {
+        var lineY = ecy + (li2 - (numLines - 1) / 2) * lineStep;
+        var dy2 = lineY - ecy;
+        // Available width at this y-position from ellipse equation
+        var ratioSq = (dy2 * dy2) / (iry * iry);
+        var availW2 = ratioSq >= 1 ? irx * 0.5 : 2 * irx * Math.sqrt(1 - ratioSq);
+        var fontSize = computeFontSizeForWidth(ctx, font.family, fontWeight, lines[li2], availW2 * textOverlap);
+        fontSize = Math.max(16, Math.min(fontSize, iry * 1.5));
+        lineInfos.push({ text: lines[li2], y: lineY, fontSize: fontSize });
+      }
+
+      // 5. Draw text lines in black
       ctx.fillStyle = "#000000";
-      ctx.font = fontWeight + " " + fontSize + "px " + font.family;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillText(text, ecx, ecy);
+      for (var li3 = 0; li3 < lineInfos.length; li3++) {
+        var info = lineInfos[li3];
+        ctx.font = fontWeight + " " + info.fontSize + "px " + font.family;
+        ctx.fillText(info.text, ecx, info.y);
+      }
+
+      // 6. Draw connector bars (bridges from text to ring)
+      if (enableConnectors) {
+        var connH = connectorThickness * 3;
+        ctx.fillStyle = "#000000";
+        for (var li4 = 0; li4 < lineInfos.length; li4++) {
+          var inf = lineInfos[li4];
+          ctx.font = fontWeight + " " + inf.fontSize + "px " + font.family;
+          var measuredW = ctx.measureText(inf.text).width;
+          var dy3 = inf.y - ecy;
+          var ratioSq2 = (dy3 * dy3) / (iry * iry);
+          if (ratioSq2 >= 1) continue;
+          var ringInnerHalfW = irx * Math.sqrt(1 - ratioSq2);
+          var textHalfW = measuredW / 2;
+
+          // Left connector: from ring inner edge to text left edge
+          var leftRingX = ecx - ringInnerHalfW;
+          var leftTextX = ecx - textHalfW;
+          if (leftTextX > leftRingX + 2) {
+            ctx.fillRect(leftRingX - borderPx * 0.5, inf.y - connH / 2,
+              leftTextX - leftRingX + borderPx * 0.5 + 2, connH);
+          }
+
+          // Right connector: from text right edge to ring inner edge
+          var rightRingX = ecx + ringInnerHalfW;
+          var rightTextX = ecx + textHalfW;
+          if (rightTextX < rightRingX - 2) {
+            ctx.fillRect(rightTextX - 2, inf.y - connH / 2,
+              rightRingX - rightTextX + borderPx * 0.5 + 2, connH);
+          }
+        }
+      }
 
       setPreviewDataUrl(cv.toDataURL());
 
+      // 7. Extract contours via marching squares
       var data = ctx.getImageData(0, 0, cw, ch);
       var binary = new Uint8Array(cw * ch);
       for (var i = 0; i < cw * ch; i++) {
-        var r = data.data[i*4], g = data.data[i*4+1], b = data.data[i*4+2];
-        var gray = 0.299*r + 0.587*g + 0.114*b;
+        var r = data.data[i*4], g = data.data[i*4+1], b2 = data.data[i*4+2];
+        var gray = 0.299*r + 0.587*g + 0.114*b2;
         binary[i] = gray < 128 ? 1 : 0;
       }
 
@@ -790,9 +882,11 @@ export default function TextCircleTool() {
 
       setContours(processed);
       setDownloadUrl(null);
-      setFileName(text.replace(/[^a-zA-Z0-9äöüÄÖÜß]/g, "_").substring(0, 30));
+      var cleanName = lines.join("_").replace(/[^a-zA-Z0-9äöüÄÖÜß_]/g, "").substring(0, 30);
+      setFileName(cleanName || "text_circle");
     });
-  }, [text, fontIdx, bold, padding, ellipseRatio, borderThickness, smoothIter, sharpAngle]);
+  }, [text, fontIdx, bold, padding, ellipseRatio, borderThickness, smoothIter, sharpAngle,
+      textOverlap, enableConnectors, connectorThickness, textYOffset]);
 
   _e(function() {
     renderAndExtract();
@@ -859,16 +953,16 @@ export default function TextCircleTool() {
   return (
     <div style={{ width: "100%", maxWidth: 540, display: "flex", flexDirection: "column", gap: 14 }}>
 
-      <Section title="Text eingeben" desc="Gib den Text ein, der als 3D-Schriftzug mit Ellipse erstellt werden soll.">
-        <input
-          type="text"
+      <Section title="Text eingeben" desc="Gib den Text ein (Enter fuer neue Zeile, bis zu 3 Zeilen).">
+        <textarea
           value={text}
           onChange={function(e) { setText(e.target.value); }}
-          placeholder="Dein Text hier..."
+          rows={3}
+          placeholder={"Zeile 1\nZeile 2 (optional)\nZeile 3 (optional)"}
           style={{
             width: "100%", padding: "12px 16px", fontSize: 18, fontFamily: "inherit",
             border: "2px solid #d4bfa6", borderRadius: 12, background: "#fff",
-            color: "#3d2e1f", outline: "none"
+            color: "#3d2e1f", outline: "none", resize: "vertical", lineHeight: 1.5
           }}
         />
       </Section>
@@ -928,18 +1022,42 @@ export default function TextCircleTool() {
       </Section>
 
       <Section title="Ellipse anpassen" desc="Passe die Ellipse um den Text an.">
-        <SliderRow label="Abstand Text-Rand"
-          desc="Wie viel Platz zwischen Text und Ellipse"
-          value={padding} min={5} max={60} step={1}
-          onChange={setPadding} display={padding + " px"} />
-        <SliderRow label="Ellipsen-Hoehe"
-          desc="Verhaeltnis der Hoehe zur Texthoehe (hoeher = rundere Ellipse)"
+        <SliderRow label="Ellipsen-Form"
+          desc="Verhaeltnis Breite zu Hoehe (1 = Kreis, hoeher = breiter)"
           value={ellipseRatio} min={0.8} max={2.5} step={0.05}
           onChange={setEllipseRatio} display={ellipseRatio.toFixed(2) + "x"} />
         <SliderRow label="Rahmen-Staerke"
           desc="Dicke des Ellipsen-Rahmens"
           value={borderThickness} min={0.5} max={6} step={0.25}
           onChange={setBorderThickness} display={borderThickness.toFixed(1)} />
+        <SliderRow label="Text-Ueberlappung"
+          desc="Wie weit Text ueber den Innenrand hinausreicht (>1 = Text kreuzt den Ring)"
+          value={textOverlap} min={0.7} max={1.5} step={0.05}
+          onChange={setTextOverlap} display={textOverlap.toFixed(2) + "x"} />
+        <SliderRow label="Zeilen-Abstand"
+          desc="Abstand zwischen den Textzeilen"
+          value={padding} min={0} max={60} step={1}
+          onChange={setPadding} display={padding + " px"} />
+        <SliderRow label="Text vertikal verschieben"
+          desc="Text nach oben oder unten verschieben"
+          value={textYOffset} min={-50} max={50} step={1}
+          onChange={setTextYOffset} display={textYOffset + " px"} />
+        <div style={{ marginTop: 6, marginBottom: 8 }}>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <PillButton active={enableConnectors} onClick={function() { setEnableConnectors(true); }}>
+              Verbindungs-Stege an
+            </PillButton>
+            <PillButton active={!enableConnectors} onClick={function() { setEnableConnectors(false); }}>
+              Verbindungs-Stege aus
+            </PillButton>
+          </div>
+        </div>
+        {enableConnectors && (
+          <SliderRow label="Steg-Staerke"
+            desc="Dicke der Verbindungsstege zwischen Text und Ring"
+            value={connectorThickness} min={0.5} max={5} step={0.25}
+            onChange={setConnectorThickness} display={connectorThickness.toFixed(1)} />
+        )}
       </Section>
 
       {previewDataUrl && (

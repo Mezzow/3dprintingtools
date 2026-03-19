@@ -1026,67 +1026,84 @@ export default function TextCircleTool() {
       // === Draw combined shape in black for contour extraction ===
       drawBase("#000000", "#000000");
 
-      // Connectors: scan the rendered image for actual pixel gaps and bridge them.
-      // Two darkness levels: "solid" (< 64) to find definite letter body,
-      // "any" (< 200) to detect anti-aliased edges so we bridge past them.
+      // Connectors: scan the rendered image for pixel gaps and bridge them.
+      // Strategy: use a thin horizontal band at bridge height to detect gaps
+      // exactly where the bridge will be placed, with a moderate threshold
+      // that ignores faint anti-aliasing. Max gap width prevents bridging
+      // internal letter features (like inside "o" or "e").
       var bridgeH = Math.max(4, Math.round(fontSize * 0.06));
+      var maxGapW = Math.round(fontSize * 0.25); // don't bridge gaps wider than this
 
       // Scan region: outer ring edge to outer ring edge
       var fullLeft = Math.max(0, Math.floor(ecx - erx - 5));
       var fullRight = Math.min(cw, Math.ceil(ecx + erx + 5));
       var fullW = fullRight - fullLeft;
-      // Tall band covers most of the letter body so internal features don't create false gaps
-      var bandH = Math.max(10, Math.round(fontSize * 0.9));
-      var bandTop = Math.max(0, Math.round(ecy - bandH / 2));
-      var bandActH = Math.min(ch - bandTop, bandH);
+
+      // Thin band at vertical center — exactly where the bridge sits
+      var scanH = Math.max(6, bridgeH + 4);
+      var scanTop = Math.max(0, Math.round(ecy - scanH / 2));
+      var scanActH = Math.min(ch - scanTop, scanH);
+
+      // Also a tall band for a "solid body" map — used to extend bridges
+      var tallH = Math.max(10, Math.round(fontSize * 0.9));
+      var tallTop = Math.max(0, Math.round(ecy - tallH / 2));
+      var tallActH = Math.min(ch - tallTop, tallH);
 
       var gapBridges = [];
-      if (fullW > 0 && bandActH > 0) {
-        var fd = ctx.getImageData(fullLeft, bandTop, fullW, bandActH);
-        // colAny: column has any ink at all (catches anti-aliased edges)
-        // colSolid: column has fully solid ink (definite letter body)
-        var colAny = new Uint8Array(fullW);
-        var colSolid = new Uint8Array(fullW);
+      if (fullW > 0 && scanActH > 0 && tallActH > 0) {
+        // Thin band: detect gaps at bridge height
+        var sd = ctx.getImageData(fullLeft, scanTop, fullW, scanActH);
+        var colInk = new Uint8Array(fullW); // has visible ink at bridge height
         for (var c = 0; c < fullW; c++) {
-          for (var r = 0; r < bandActH; r++) {
-            var v = fd.data[(r * fullW + c) * 4];
-            if (v < 200) colAny[c] = 1;
-            if (v < 64) { colSolid[c] = 1; break; }
+          for (var r = 0; r < scanActH; r++) {
+            if (sd.data[(r * fullW + c) * 4] < 128) {
+              colInk[c] = 1;
+              break;
+            }
           }
         }
 
-        // Find gaps using the lenient "any" map — a gap is a run of columns
-        // with NO ink at all (not even anti-aliased). This ensures we detect
-        // even narrow gaps between letters.
+        // Tall band: find solid letter body for bridge extension
+        var td = ctx.getImageData(fullLeft, tallTop, fullW, tallActH);
+        var colSolid = new Uint8Array(fullW);
+        for (var c = 0; c < fullW; c++) {
+          for (var r = 0; r < tallActH; r++) {
+            if (td.data[(r * fullW + c) * 4] < 32) {
+              colSolid[c] = 1;
+              break;
+            }
+          }
+        }
+
+        // Find gaps: runs of non-ink columns in the thin band
         ctx.fillStyle = "#000000";
         var inGap = false;
         var gapStart = 0;
         for (var c = 0; c <= fullW; c++) {
-          var hasInk = c < fullW ? colAny[c] : 1;
-          if (!hasInk && !inGap) {
+          var ink = c < fullW ? colInk[c] : 1;
+          if (!ink && !inGap) {
             inGap = true;
             gapStart = c;
-          } else if (hasInk && inGap) {
+          } else if (ink && inGap) {
             inGap = false;
-            // Only bridge if there's solid material on both sides
-            var hasLeft = false, hasRight = false;
-            for (var sl = gapStart - 1; sl >= 0 && sl >= gapStart - 20; sl--) {
-              if (colSolid[sl]) { hasLeft = true; break; }
+            var gapW = c - gapStart;
+            // Skip gaps too wide (internal letter features) or at edges
+            if (gapW > maxGapW) continue;
+            // Must have solid material within reach on both sides
+            var solidL = -1, solidR = -1;
+            for (var sl = gapStart - 1; sl >= 0 && sl >= gapStart - 30; sl--) {
+              if (colSolid[sl]) { solidL = sl; break; }
             }
-            for (var sr = c; sr < fullW && sr <= c + 20; sr++) {
-              if (colSolid[sr]) { hasRight = true; break; }
+            for (var sr = c; sr < fullW && sr <= c + 30; sr++) {
+              if (colSolid[sr]) { solidR = sr; break; }
             }
-            if (hasLeft && hasRight) {
-              // Extend bridge into solid letter body on each side
-              var bridgeLeft = gapStart;
-              while (bridgeLeft > 0 && !colSolid[bridgeLeft - 1]) bridgeLeft--;
-              bridgeLeft = Math.max(0, bridgeLeft - 2); // 2px extra past solid
-              var bridgeRight = c - 1;
-              while (bridgeRight < fullW - 1 && !colSolid[bridgeRight + 1]) bridgeRight++;
-              bridgeRight = Math.min(fullW - 1, bridgeRight + 2); // 2px extra past solid
-
-              var gX = fullLeft + bridgeLeft;
-              var gW = bridgeRight - bridgeLeft + 1;
+            if (solidL >= 0 && solidR >= 0) {
+              // Bridge from a few px into left solid body to a few px into right
+              var extra = Math.max(2, Math.round(fontSize * 0.02));
+              var bL = Math.max(0, solidL - extra);
+              var bR = Math.min(fullW - 1, solidR + extra);
+              var gX = fullLeft + bL;
+              var gW = bR - bL + 1;
               var gY = Math.round(ecy - bridgeH / 2);
               ctx.fillRect(gX, gY, gW, bridgeH);
               gapBridges.push([gX, gY, gW, bridgeH]);

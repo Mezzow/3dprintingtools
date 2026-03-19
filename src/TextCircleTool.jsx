@@ -872,6 +872,7 @@ export default function TextCircleTool() {
   var sj = _s(2), smoothIter = sj[0], setSmoothIter = sj[1];
   var sk = _s(120), sharpAngle = sk[0], setSharpAngle = sk[1];
   var sm = _s(1.3), ellipseRatio = sm[0], setEllipseRatio = sm[1];
+  var sn = _s(5.0), borderThickness = sn[0], setBorderThickness = sn[1];
   var so = _s([]), contours = so[0], setContours = so[1];
   var sp = _s([]), previewTris = sp[0], setPreviewTris = sp[1];
   var sq = _s(null), downloadUrl = sq[0], setDownloadUrl = sq[1];
@@ -879,7 +880,7 @@ export default function TextCircleTool() {
   var ss = _s(""), fileName = ss[0], setFileName = ss[1];
   var st = _s(null), previewDataUrl = st[0], setPreviewDataUrl = st[1];
   var su = _s(""), fontSearch = su[0], setFontSearch = su[1];
-  var sv = _s(1.3), textOverlap = sv[0], setTextOverlap = sv[1];
+  var sv = _s(1.1), textOverlap = sv[0], setTextOverlap = sv[1];
   var sy = _s(0), textYOffset = sy[0], setTextYOffset = sy[1];
 
   _e(function() {
@@ -921,52 +922,69 @@ export default function TextCircleTool() {
       var margin = 20;
       var erx = cw / 2 - margin;
       var ery = ch / 2 - margin;
+      var borderPx = borderThickness * 4;
+      var irx = Math.max(1, erx - borderPx);
+      var iry = Math.max(1, ery - borderPx);
 
-      // Compute font size: textOverlap controls how much text extends beyond the ellipse
-      var availW = 2 * erx * textOverlap;
+      // Compute font size to fit text within inner ellipse width * overlap factor
+      var availW = 2 * irx * textOverlap;
       var fontSize = computeFontSizeForWidth(ctx, font.family, fontWeight, line, availW);
-      fontSize = Math.max(16, Math.min(fontSize, ery * 1.5));
+      fontSize = Math.max(16, Math.min(fontSize, iry * 1.5));
 
-      // Draw combined shape: filled ellipse + filled text
-      // Both rendered black on white — they merge into one connected silhouette
+      // === DRAW COMBINED SHAPE for contour extraction (single pass) ===
+      // Everything black on white. Ring + text + connector strip = one connected shape.
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, cw, ch);
 
-      // Filled solid ellipse (disk, not ring)
+      // 1. Filled ring: outer ellipse black, inner ellipse white
       ctx.beginPath();
       ctx.ellipse(ecx, ecy, erx, ery, 0, 0, 2 * Math.PI);
       ctx.fillStyle = "#000000";
       ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(ecx, ecy, irx, iry, 0, 0, 2 * Math.PI);
+      ctx.fillStyle = "#ffffff";
+      ctx.fill();
 
-      // Filled text — overlaps with the disk, extending beyond where needed
+      // 2. Filled text
       ctx.fillStyle = "#000000";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.font = fontWeight + " " + fontSize + "px " + font.family;
       ctx.fillText(line, ecx, ecy);
 
-      // Extract contours from the combined silhouette (single pass)
+      // 3. Thin connecting strip at text center — bridges text to ring
+      // Spans from outer ring left edge to outer ring right edge
+      // Barely visible in print (~0.5mm) but structurally connects everything
+      var stripH = Math.max(3, Math.round(fontSize * 0.04));
+      ctx.fillStyle = "#000000";
+      ctx.fillRect(ecx - erx, ecy - stripH / 2, 2 * erx, stripH);
+
+      // Single-pass contour extraction from combined shape
       var allContours = extractContoursFromCanvas(ctx, cw, ch, smoothIter, sharpAngle);
       setContours(allContours);
 
-      // For preview: redraw with the ellipse in dark gray so user can see text vs disk
+      // === PREVIEW IMAGE: redraw with visual distinction ===
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, cw, ch);
+      // Ring in dark gray
       ctx.beginPath();
       ctx.ellipse(ecx, ecy, erx, ery, 0, 0, 2 * Math.PI);
-      ctx.fillStyle = "#c0c0c0";
+      ctx.fillStyle = "#555555";
       ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(ecx, ecy, irx, iry, 0, 0, 2 * Math.PI);
+      ctx.fillStyle = "#ffffff";
+      ctx.fill();
+      // Text in black
       ctx.fillStyle = "#000000";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.font = fontWeight + " " + fontSize + "px " + font.family;
       ctx.fillText(line, ecx, ecy);
-      // Draw ellipse outline for clarity
-      ctx.beginPath();
-      ctx.ellipse(ecx, ecy, erx, ery, 0, 0, 2 * Math.PI);
-      ctx.strokeStyle = "#888888";
-      ctx.lineWidth = 2;
-      ctx.stroke();
+      // Connector strip in subtle gray
+      ctx.fillStyle = "#999999";
+      ctx.fillRect(ecx - erx, ecy - stripH / 2, 2 * erx, stripH);
 
       setPreviewDataUrl(cv.toDataURL());
 
@@ -974,7 +992,8 @@ export default function TextCircleTool() {
       var cleanName = line.replace(/[^a-zA-Z0-9äöüÄÖÜß_]/g, "").substring(0, 30);
       setFileName(cleanName || "text_circle");
     });
-  }, [text, fontIdx, bold, ellipseRatio, smoothIter, sharpAngle, textOverlap, textYOffset]);
+  }, [text, fontIdx, bold, ellipseRatio, borderThickness, smoothIter, sharpAngle,
+      textOverlap, textYOffset]);
 
   _e(function() {
     renderAndExtract();
@@ -1114,9 +1133,13 @@ export default function TextCircleTool() {
           desc="Verhaeltnis Breite zu Hoehe (1 = Kreis, hoeher = breiter)"
           value={ellipseRatio} min={0.8} max={2.5} step={0.05}
           onChange={setEllipseRatio} display={ellipseRatio.toFixed(2) + "x"} />
-        <SliderRow label="Textgroesse"
-          desc="Wie gross der Text relativ zur Ellipse ist (>1 = Text ragt ueber den Rand hinaus)"
-          value={textOverlap} min={0.5} max={2.0} step={0.05}
+        <SliderRow label="Rahmen-Staerke"
+          desc="Dicke des Ellipsen-Rahmens"
+          value={borderThickness} min={1} max={10} step={0.5}
+          onChange={setBorderThickness} display={borderThickness.toFixed(1)} />
+        <SliderRow label="Text-Ueberlappung"
+          desc="Wie weit der Text ueber den Innenrand hinausreicht (>1 = Text kreuzt den Rahmen)"
+          value={textOverlap} min={0.7} max={1.5} step={0.05}
           onChange={setTextOverlap} display={textOverlap.toFixed(2) + "x"} />
         <SliderRow label="Text vertikal verschieben"
           desc="Text nach oben oder unten verschieben"
